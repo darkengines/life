@@ -299,12 +299,19 @@ The GPU produces **two** things, and the simulation hot-loads both:
    decisions. The blend is partial deliberately: at full strength every creature would start
    identical and the variation selection needs would be gone.
 
-Measured, pooled over 4 seeds and ~17k samples per condition: prey-pursuit alignment goes from
-**−0.0102 under evolution alone to +0.0149 with trained perception and instinct (diff +0.0251
-±0.0216)**, and is positive in **all four seeds** versus negative in three of four without it.
-Mate-approach trends positive (3 of 4 seeds) but stays within noise; fleeing shows nothing. This is
-statistically defensible evidence that the training loop shapes real behaviour — though the effect
-is still small in absolute terms, and only for the behaviour this world actually rewards.
+**A result that did NOT replicate — stated plainly.** An earlier measurement found prey-pursuit
+alignment improving from −0.0102 to +0.0149 with trained perception and instinct (diff +0.0251
+against a ±0.0216 noise band), positive in all four seeds, and it was reported here as
+statistically defensible. After the sense space grew (shelter channels, swim effort, turn bias) and
+the world changed (forward-direction fix, drifting food blooms), the comparison was re-run with 29
+rounds of retraining and larger samples: **all three behaviours now sit within noise** — chase
++0.0041 ±0.0288, flee −0.0087 ±0.0305, mate −0.0058 ±0.0263.
+
+The original effect was marginal (barely clearing its own error bar) and has not held up. The
+honest position is that **the training loop is demonstrably learning** — it predicts world dynamics
+several times better than a do-nothing baseline and its policy loss falls steadily — but there is
+**no reproducible evidence yet that this improves behaviour**. Treat the pipeline as built and
+working mechanically, not as validated.
 
 **Original measured starting point** (before the shared encoder and the training loop): evolved
 brains were *no better than random ones* at steering toward food (forage alignment −0.012 evolved vs
