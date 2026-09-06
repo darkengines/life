@@ -1285,7 +1285,22 @@ pub fn tick(world: &mut World) {
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
-            let d: [f32; ACT_DIM] = world.individuals.decide(slot, &s, &world.shared_enc_w, &world.shared_enc_b);
+            let mut d: [f32; ACT_DIM] = world.individuals.decide(slot, &s, &world.shared_enc_w, &world.shared_enc_b);
+            // Scrambling control. Blended deterministically from slot and
+            // tick rather than from the RNG, because this closure runs in
+            // parallel and has to stay a pure function of tick-start state.
+            if world.brain_noise > 0.0 {
+                let mix = world.brain_noise.clamp(0.0, 1.0);
+                for (j, out) in d.iter_mut().enumerate() {
+                    let h = (slot as u64)
+                        .wrapping_mul(0x9E3779B97F4A7C15)
+                        .wrapping_add(world.tick_count.wrapping_mul(0xBF58476D1CE4E5B9))
+                        .wrapping_add(j as u64 * 0x94D049BB133111EB);
+                    let h = (h ^ (h >> 31)).wrapping_mul(0xD6E8FEB86659FD93);
+                    let r = ((h >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0;
+                    *out = *out * (1.0 - mix) + r * mix;
+                }
+            }
             let cached_ok = pos_cache[slot].as_ref().map_or(false, |p| p.len() == world.individuals.pixel_count[slot] as usize);
             let (ind_pos, ind_vel) = if cached_ok {
                 (pos_cache[slot].clone().unwrap(), vel_cache[slot].clone().unwrap())
@@ -1486,8 +1501,8 @@ pub fn tick(world: &mut World) {
             // that removed the full overlap at once would inject energy and
             // make dense crowds explode.
             let mut corr = [
-                separation[0] * crate::CONTACT_CORRECTION * mobility,
-                separation[1] * crate::CONTACT_CORRECTION * mobility,
+                separation[0] * world.contact_correction * mobility,
+                separation[1] * world.contact_correction * mobility,
             ];
             let corr_mag = (corr[0] * corr[0] + corr[1] * corr[1]).sqrt();
             if corr_mag > crate::CONTACT_CORRECTION_MAX {

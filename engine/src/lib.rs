@@ -765,6 +765,17 @@ pub struct World {
     /// were still measured sitting inside another animal's component, so how
     /// hard contact actually pushes has to be swept rather than guessed.
     pub collision_stiffness: f32,
+    /// Runtime-overridable CONTACT_CORRECTION, so the positional half of
+    /// contact resolution can be turned off and compared against the pure
+    /// force solver it replaced. 0.0 restores the old behaviour exactly.
+    pub contact_correction: f32,
+    /// Test-only: replaces every brain's output with deterministic noise.
+    /// The point is to answer, before spending any more effort on making
+    /// brains bigger or better trained, whether the brain is doing ANYTHING
+    /// measurable -- if a world of animals deciding at random performs the
+    /// same as a world of evolved ones, then behaviour is not on the critical
+    /// path to fitness and no amount of network capacity will change that.
+    pub brain_noise: f32,
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
@@ -868,6 +879,8 @@ impl World {
             part_metabolism: PART_METABOLISM,
             metabolic_exponent: METABOLIC_EXPONENT,
             collision_stiffness: COLLISION_STIFFNESS,
+            contact_correction: CONTACT_CORRECTION,
+            brain_noise: 0.0,
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
@@ -1435,6 +1448,18 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: 0.0 leaves brains alone, 1.0 replaces every decision with
+    /// deterministic noise. See `brain_noise`.
+    fn debug_set_brain_noise(&mut self, v: f32) {
+        self.brain_noise = v;
+    }
+
+    /// Test-only: overrides the positional half of contact resolution.
+    /// 0.0 is the old force-only solver.
+    fn debug_set_contact_correction(&mut self, v: f32) {
+        self.contact_correction = v;
     }
 
     /// Test-only: overrides how hard overlapping bodies push apart.
