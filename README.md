@@ -355,8 +355,21 @@ stops bodies interpenetrating also stops predators reaching their prey. The worl
 world, overlap is unavoidable and a ratio of 1.0 is the floor. Crowding is now a density problem,
 not a collision problem, and the lever for it is the metabolic economy rather than the solver.
 
-Cost: 26-36 ticks/s at 12000-22000 components, against 51-83 ticks/s at 2500-12000. Most of that
-is simply more animals to simulate.
+Fixing it correctly also made it **twice as fast**. Contact was broad-phasing through the body
+grid, which indexes each animal by its root alone, so the query had to be wide enough to reach the
+largest animal in the *world* -- one forty-part giant made every other body, however small, sweep a
+radius-twenty neighbourhood of hundreds of mostly empty cells, and then test all of its components
+against all of theirs. Indexing the components themselves instead means a component queries only its
+own contact reach, about a unit, and finds exactly what could touch it: **72.3 ticks/s at 11589
+components, against 34.8 ticks/s at 11991 before**.
+
+The first attempt at that rewrite crashed, and the reason is worth keeping. The position cache and
+the part grid are both built *before* the attachment loop, which bites parts off victims and
+reallocates their storage -- so a body's offset and count can both move within a single tick. The
+original code guarded against this by requiring the cached length to still match the live part
+count. The rewrite checked only that the index was inside the cache, which does not reject a body
+that shrank, and read past the end of the arena. A cache that is one phase stale is not the same as
+a cache that is merely indexed safely.
 
 ---
 
@@ -618,7 +631,15 @@ brains performed no better than random ones.
 
 ### Bodies and structure
 
-- **[x] More basic components.** Seven part types: body, eye, mouth, gut, tentacle, armor, flipper.
+- **[x] More basic components.** Eight part types: body, eye, mouth, gut, tentacle, armor, flipper,
+  and a filtering mesh. The filter is the interesting one: grazing yield deliberately falls away as
+  a body gets heavier, so large animals are forced to hunt and a real food chain exists rather than
+  one undifferentiated crowd. That rule had no exception, and nature's most conspicuous exception is
+  exactly the animal it forbids -- the enormous filter feeder living on the smallest food in the
+  ocean, which is also the "whale eating all small organisms" that was asked for. Filter tissue
+  raises the mass at which grazing stops paying, in proportion to the filtering surface carried, so
+  there are now two ways to be large instead of one. It is not free: a mesh is a broad face held into
+  the flow and drags like one, which is why a filter feeder is slow, and it banks no energy.
 - **[x] Bilateral symmetry as a property of a node.** Growing a component on a symmetric node
   emits a mirrored twin at the reflected angle, with mirrored hinge limits. The trait was
   inherited but could not be *expressed*: only a lateral growth can pair, since a direction lying
