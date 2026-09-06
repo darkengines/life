@@ -83,6 +83,38 @@ pub const PART_ARMOR: u8 = 5;
 pub const PART_FLIPPER: u8 = 6;
 pub const PART_KIND_COUNT: u8 = 7;
 
+/// How thick each organ kind is, as a multiplier on the heritable per-part
+/// `size`. Until now every organ was drawn and collided as the same lump and
+/// only its colour differed, so anatomy was unreadable and a tentacle
+/// occupied exactly as much water as an armour plate. This gives each kind a
+/// characteristic girth: a belly bulges, armour is a slab, an eye is a small
+/// lens, a tentacle is thin.
+///
+/// Deliberately applied to GIRTH only, never to segment length. One scalar
+/// cannot express "long and thin" -- baking it into length would make
+/// tentacles stubby, which is the opposite of a tentacle. And it is applied
+/// at the point of use rather than stored into `size`, so `size` stays a
+/// purely heritable trait; multiplying it in at growth would compound the
+/// factor again every generation a part was inherited through.
+pub const PART_GIRTH: [f32; PART_KIND_COUNT as usize] = [
+    1.00, // body
+    0.62, // eye: a small lens
+    0.78, // mouth
+    1.35, // gut: the belly, and it should look like one
+    0.55, // tentacle: thin
+    1.30, // armor: a slab
+    1.15, // flipper: broad
+];
+
+/// The heritable size of a part, scaled by what kind of organ it is. This is
+/// the number that should drive anything spatial -- drawn radius, collision
+/// footprint, contact distance -- so that what is on screen is what the
+/// physics actually uses.
+#[inline]
+pub fn girth(pixels: &PixelArena, idx: usize) -> f32 {
+    pixels.size[idx] * PART_GIRTH[pixels.part_type[idx] as usize]
+}
+
 impl PixelArena {
     pub fn new() -> Self {
         PixelArena {

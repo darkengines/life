@@ -642,8 +642,23 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
                 let od_dir = angle_to_dir(od);
                 od_dir == d
             });
+            // A symmetric node grows SIDEWAYS by preference. Bilateral
+            // symmetry is not just a flag on a part, it is a developmental
+            // program that puts paired appendages out along the flanks of a
+            // body axis -- and only a lateral growth (dy != 0) can pair at
+            // all, since a direction lying on the axis is its own mirror.
+            // Without this the flag was almost inert: 35% of founders carried
+            // it and it was faithfully inherited, yet only ~12% of bodies
+            // ever showed a mirrored pair, because tip extension runs along
+            // the axis where pairing is impossible by construction. So
+            // symmetric nodes were being handed a trait they could not
+            // express.
+            let mut w = if extends_tip { tip_weight } else { 1.0 };
+            if pixels.symmetric[offset as usize + k] && d.1 != 0 {
+                w *= crate::SYMMETRY_LATERAL_WEIGHT;
+            }
             candidates.push((k, d));
-            weights.push(if extends_tip { tip_weight } else { 1.0 });
+            weights.push(w);
         }
     }
     if candidates.is_empty() {

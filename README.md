@@ -276,6 +276,49 @@ The striking result is the baseline: **the untreated world is effectively a two-
 population cost; `0.035` buys far more diversity but costs a third to two thirds of the population.
 This is a genuine diversity-versus-population trade-off, not a single correct value.
 
+**The same settings, two completely different worlds.** A scarcity sweep run at identical
+parameters landed on wildly different outcomes depending only on the RNG seed:
+
+| regrow | meal | seed | pop | mean parts | >=12 parts | worms |
+|---|---|---|---|---|---|---|
+| 0.030 | 1.4 | 11 | 1320 | 4.7 | **1.9%** | 35% |
+| 0.030 | 1.4 | 22 | 1055 | **13.3** | **63.1%** | 5% |
+| 0.006 | 8.0 | 22 | 707 | 12.7 | 47.8% | 6% |
+
+This is the single most important measurement in the project so far, for two reasons. First, **the
+complex basin already exists** — the engine can and does produce worlds where nearly two thirds of
+all animals carry twelve or more parts and worms are a rounding error. The problem was never that
+complexity is impossible; it is that which basin a run falls into is not reliable. Second, it means
+**every single-seed measurement in this project is worthless**, including several taken earlier. The
+spread between seeds is far larger than any effect being measured. All A/B work from here on runs
+multiple seeds and reports the spread.
+
+The likely mechanism is a classic **priority effect / alternative stable state** (Beisner et al.
+2003; Fukami 2015): if worms saturate the world first they pin food to zero, and nobody can then
+accumulate the energy surplus a large body needs to get established. If a large lineage gets going
+first, it eats the worms and holds the space. Making the complex basin *reliable*, rather than a
+coin flip, is now the central objective.
+
+**Metabolism was linear in body size, which is biologically wrong and quietly fatal to complexity.**
+Upkeep was computed as a straight sum over parts, so a sixteen-part animal paid sixteen times the
+running cost of a one-part blob with nothing offsetting it. Complexity was therefore a pure tax and
+selection stripped it out as fast as growth added it. Real metabolic rate scales as roughly
+*mass^(3/4)* across twenty-seven orders of magnitude of body mass (Kleiber 1932; West, Brown &
+Enquist 1997) — large animals get a large per-gram energy *discount*, and that discount is much of
+why being big is viable at all. Now implemented, normalised at one part so it only ever makes large
+bodies cheaper, never small ones dearer.
+
+**Active organs were being selected against.** Measured on the live world, the passive organs pay
+(gut 13.9% of all tissue, tentacle 6.1%) while every *active* organ sits below the ~5% that random
+differentiation alone would produce: flipper 3.7%, eye 2.8%, mouth 2.1%. Eyes matter most, because
+without eyes there is no perception, and with no perception no amount of brain can help. Two causes
+were found, and they were deliberately measured apart: sensors were priced like armour plate, and —
+more damning — **foraging was never gated on eyes at all**. The food gradient was sampled out to
+range 18 for every creature regardless of anatomy, so a blind animal found distant food exactly as
+well as a sighted one and an eye bought nothing but upkeep. Smell is now short-range and sight is
+what reaches; chemoreception in water genuinely is diffuse and local while vision is directional and
+long-ranged, so this is the honest model as well as the useful one.
+
 ---
 
 ## 8. Roadmap / wishlist
@@ -648,6 +691,30 @@ mechanic was failing; effective species count (inverse Simpson) showed it workin
 - [Pathogen regulation of plant diversity via effective specialization](https://pubmed.ncbi.nlm.nih.gov/24091206/)
 - [Closing the gap in the Janzen–Connell hypothesis: what determines pathogen diversity?](https://onlinelibrary.wiley.com/doi/abs/10.1111/ele.14316) — Ecology Letters 2024
 - [Contribution of conspecific negative density dependence to species diversity](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8455644/)
+
+**Metabolic scaling** — basis for the Kleiber discount that makes large bodies viable (§7).
+- Kleiber, M. (1932), *Body size and metabolism*, Hilgardia 6:315-353 — the original observation that
+  metabolic rate scales as mass^(3/4) rather than in proportion to mass.
+- West, G. B., Brown, J. H. & Enquist, B. J. (1997), [A general model for the origin of allometric
+  scaling laws in biology](https://www.science.org/doi/10.1126/science.276.5309.122) — Science. Derives
+  the 3/4 exponent from the geometry of resource-distribution networks.
+- Brown, J. H. et al. (2004), [Toward a metabolic theory of ecology](https://esajournals.onlinelibrary.wiley.com/doi/10.1890/03-9000)
+  — Ecology. Metabolic rate as the pacemaker for growth, reproduction and population dynamics.
+
+**Alternative stable states and priority effects** — the framing for the seed-bistability result (§7),
+where identical parameters produce either a worm world or a large-bodied one.
+- Beisner, B. E., Haydon, D. T. & Cuddington, K. (2003), [Alternative stable states in ecology](https://esajournals.onlinelibrary.wiley.com/doi/10.1890/1540-9295%282003%29001%5B0376%3AASSIE%5D2.0.CO%3B2)
+  — Frontiers in Ecology and the Environment.
+- Fukami, T. (2015), [Historical contingency in community assembly: integrating niches, species pools,
+  and priority effects](https://www.annualreviews.org/doi/10.1146/annurev-ecolsys-110411-160340)
+  — Annual Review of Ecology, Evolution, and Systematics.
+- Scheffer, M. et al. (2001), [Catastrophic shifts in ecosystems](https://www.nature.com/articles/35098000)
+  — Nature.
+
+**Chemoreception vs vision** — basis for making smell short-range and sight long-range (§7).
+- Atema, J. (1995), [Chemical signals in the marine environment: dispersal, detection, and temporal
+  signal analysis](https://pmc.ncbi.nlm.nih.gov/articles/PMC40010/) — PNAS. Odour plumes are diffuse,
+  intermittent and give poor directional information compared with vision.
 
 **Physics / rendering**
 - [zalo — Constraints (Verlet / PBD)](https://zalo.github.io/blog/constraints/) — considered as a full

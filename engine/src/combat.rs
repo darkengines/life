@@ -72,7 +72,7 @@ pub fn inject_venom(world: &mut World, attacker: usize, world_x: u32, world_y: u
 /// parts (pixels.rs's `size`) are a bigger target, exactly like a bigger
 /// animal's flank is easier to land a hit on than a small one's.
 pub fn hit_radius(world: &World, target_offset: usize, local_idx: usize) -> f32 {
-    crate::COLLISION_RADIUS * (0.5 + 0.5 * world.pixels.size[target_offset + local_idx])
+    crate::COLLISION_RADIUS * (0.5 + 0.5 * crate::pixels::girth(&world.pixels, target_offset + local_idx))
 }
 
 /// Slow passive healing: pixels below their max health regenerate a little

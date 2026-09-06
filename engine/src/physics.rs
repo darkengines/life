@@ -362,9 +362,20 @@ pub(crate) fn metabolic_part_load(world: &World, slot: usize) -> f32 {
     let counts = &world.individuals.part_counts[slot];
     let mut load = 0.0;
     for kind in 0..crate::pixels::PART_KIND_COUNT as usize {
-        load += counts[kind] as f32 * crate::PART_METABOLISM[kind];
+        load += counts[kind] as f32 * world.part_metabolism[kind];
     }
-    load
+    // Kleiber's law. Upkeep used to be strictly linear in body size, which is
+    // both biologically wrong and, here, the quiet reason a worm always beats
+    // an animal: a 16-part body paid 16x the running cost of a 1-part body
+    // with nothing whatsoever offsetting it, so complexity was a pure tax and
+    // selection removed it as fast as growth added it. Real metabolic rate
+    // scales as roughly mass^(3/4) across twenty-seven orders of magnitude of
+    // body mass (Kleiber 1932; West, Brown & Enquist 1997), which means large
+    // animals enjoy a substantial per-gram energy DISCOUNT -- that discount is
+    // a large part of why being big is viable at all. The exponent is
+    // normalised at one part, so the smallest bodies are unaffected and this
+    // only ever makes large bodies cheaper to run, never small ones dearer.
+    load.max(1.0).powf(world.metabolic_exponent)
 }
 
 fn kin_similarity_nearest(world: &World, slot: usize, grid: &SpatialGrid) -> (f32, f32) {
@@ -473,7 +484,22 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
 /// population in all 3 A/B seeds).
 fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f32) {
     let pos = world.individuals.root_pos[slot];
-    let (fgx, fgy) = crate::fields::Fields::gradient_at_range(&world.fields.food, world.size, pos, crate::FOOD_SMELL_RANGE);
+    // Smell is SHORT range; sight is what finds food far off. The food
+    // gradient used to be sampled far away for everyone, gated on nothing, so
+    // a blind creature foraged exactly as well as a sighted one and eyes were
+    // pure cost -- measured, eyes sat at 2.8% of all tissue against a ~5%
+    // random baseline, i.e. actively selected against, which also means
+    // nothing could perceive anything and navigation intelligence had no
+    // foothold. Chemoreception in water really is diffuse and local while
+    // vision is directional and long-ranged, so the split is the honest model
+    // as well as the useful one.
+    let eyes = world.individuals.part_counts[slot][crate::pixels::PART_EYE as usize] as i32;
+    let smell_range = if eyes > 0 {
+        (world.blind_smell_range + eyes * world.sight_range_per_eye).min(crate::FOOD_SMELL_RANGE)
+    } else {
+        world.blind_smell_range
+    };
+    let (fgx, fgy) = crate::fields::Fields::gradient_at_range(&world.fields.food, world.size, pos, smell_range);
     let (phgx, phgy) = crate::fields::Fields::gradient(&world.fields.pheromone, world.size, pos);
     let (blgx, blgy) = crate::fields::Fields::gradient(&world.fields.blood, world.size, pos);
     let (acgx, acgy) = crate::fields::Fields::gradient(&world.fields.acid, world.size, pos);
@@ -1593,7 +1619,7 @@ fn shape_overlaps_rock(world: &World, slot: usize, shape: &[[f32; 2]]) -> bool {
     let offset = world.individuals.pixel_offset[slot] as usize;
     let scale = world.individuals.size_scale[slot];
     shape.iter().enumerate().any(|(k, &p)| {
-        let r = world.pixels.size[offset + k] * scale * 0.5;
+        let r = crate::pixels::girth(&world.pixels, offset + k) * scale * 0.5;
         let span = (r.ceil() as i32).max(0);
         let (gx, gy) = grid_xy(world, p);
         for dx in -span..=span {
@@ -1643,8 +1669,8 @@ fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &Spatia
             }
             let reach = crate::COLLISION_RADIUS
                 * 0.5
-                * (world.pixels.size[my_offset + pi] * my_scale
-                    + world.pixels.size[other_offset + best_oi] * other_scale);
+                * (crate::pixels::girth(&world.pixels, my_offset + pi) * my_scale
+                    + crate::pixels::girth(&world.pixels, other_offset + best_oi) * other_scale);
             if best_d > 1e-6 && best_d < reach {
                 let overlap = reach - best_d;
                 push[0] += (p[0] - best[0]) / best_d * overlap * crate::COLLISION_STIFFNESS;
@@ -1669,7 +1695,7 @@ fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &Spatia
         // large part's body sits inside stone while its centre is outside it,
         // and the bigger the part the worse the overlap. This mirrors what
         // creature-to-creature contact already does.
-        let part_radius = world.pixels.size[my_offset + pi] * my_scale * 0.5;
+        let part_radius = crate::pixels::girth(&world.pixels, my_offset + pi) * my_scale * 0.5;
         let reach = crate::TERRAIN_REPULSION_RANGE + part_radius;
         let (gx, gy) = grid_xy(world, p);
         let span = (reach.ceil() as i32).max(1);

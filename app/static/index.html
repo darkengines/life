@@ -962,6 +962,12 @@ function render() {
     const flex = ind.flex || pts.map(() => 1.0);
     const storage = ind.storage || pts.map(() => 0.0);
     const partSize = ind.part_size || pts.map(() => 1.0);
+    // Girth, not size: each organ kind has a characteristic thickness (a
+    // belly bulges, armour is a slab, an eye is a small lens, a tentacle is
+    // thin) and the engine publishes that separately precisely so it affects
+    // how wide a part is drawn without affecting where the joints are. Falls
+    // back to part_size so an older engine still renders.
+    const partGirth = ind.part_girth || partSize;
     const healthFrac = ind.health_frac || pts.map(() => 1.0);
     const sizeScale = ind.size_scale || 1.0;
     // Volume-preserving cue: a body curled up tighter than its own resting
@@ -985,7 +991,7 @@ function render() {
     for (let i = 0; i < pts.length; i++) {
       const isRoot = i === 0;
       const rigidity = 1 - (flex[i] !== undefined ? flex[i] : 1.0);
-      const partScale = partSize[i] !== undefined ? partSize[i] : 1.0;
+      const partScale = partGirth[i] !== undefined ? partGirth[i] : 1.0;
       const rad = (isRoot ? pixelSize * 0.65 : pixelSize * (0.38 + rigidity * 0.14)) * sizeScale * partScale * puff;
       const wound = 1 - (healthFrac[i] !== undefined ? healthFrac[i] : 1.0);
       // A wounded part (health.rs's per-pixel hit-point pool, drained by

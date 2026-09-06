@@ -125,11 +125,19 @@ pub const GROWTH_STRAIGHT_TIP_WEIGHT: f32 = 2.0;
 // able to flip either way when a part grows, so paired body plans are
 // something evolution finds and can also lose, not a property of the world.
 pub const SYMMETRY_FOUNDER_CHANCE: f32 = 0.35;
-pub const SYMMETRY_FLIP_CHANCE: f32 = 0.06; // odds a newly grown part is an organ rather than plain body
+pub const SYMMETRY_FLIP_CHANCE: f32 = 0.06; // odds a node's symmetry trait flips when inherited
+/// How much a symmetric node prefers to grow laterally, where a mirrored twin
+/// is actually possible, over extending along the body axis where it is not.
+pub const SYMMETRY_LATERAL_WEIGHT: f32 = 3.0;
 // Upkeep multiplier applied to PER_PIXEL_METABOLISM, indexed by part kind
 // (body, eye, mouth, gut, tentacle, armor, flipper). Plain body is the
 // cheapest thing you can be made of.
-pub const PART_METABOLISM: [f32; 7] = [1.0, 1.4, 1.5, 1.3, 1.5, 1.8, 1.6];
+// Upkeep per part kind. Sensors and fins were priced like armour plate, which
+// with no compensating payoff left eyes, mouths and flippers all selected
+// AGAINST (2.1-3.7% of tissue against a ~5% random baseline) while the purely
+// passive gut thrived at 13.9%. A sense organ is not as expensive to carry as
+// a slab of armour.
+pub const PART_METABOLISM: [f32; 7] = [1.0, 1.15, 1.3, 1.3, 1.5, 1.8, 1.35];
 // Each eye extends how far this individual can see (multiplier on
 // VISION_RANGE), so a blind lump has to bump into the world while an
 // eye-heavy body can track threats and prey at distance -- at a cost.
@@ -298,6 +306,18 @@ pub const VISION_RANGE: f32 = 12.0;
 // other fields) so an isolated, exploring individual has a real directional
 // cue toward the nearest patch instead of wandering blind until starving.
 pub const FOOD_SMELL_RANGE: i32 = 18;
+// How far a body can locate food WITHOUT eyes, and how much each eye extends
+// that. Smell alone gets you to food you are nearly on top of; sight is what
+// lets an animal cross open water toward a patch it can see.
+// Kleiber exponent: metabolic rate ~ mass^0.75, so per-part upkeep falls as
+// bodies get bigger. 1.0 would be the old (biologically wrong) linear cost.
+pub const METABOLIC_EXPONENT: f32 = 0.75;
+// Measured: setting the blind range to 4 against a full range of 18 emptied
+// the world. The founding population has almost no eyes, so a hard gate
+// starves everything long before eyes can evolve -- a bootstrapping cliff, not
+// a gradient. Blind foraging has to stay viable while being clearly worse.
+pub const FOOD_SMELL_RANGE_BLIND: i32 = 12;
+pub const FOOD_SIGHT_RANGE_PER_EYE: i32 = 3;
 
 // Day/night cycle. DAY_LENGTH is in simulated seconds (dt=0.1/tick) -- at
 // ~50-300 ticks/sec, that's a real, visibly-cycling rhythm on screen, not
@@ -689,6 +709,15 @@ pub struct World {
     /// Runtime-overridable GRAZE_MASS_REF, so the trophic threshold can be
     /// swept against fixed seeds instead of guessed at.
     pub graze_mass_ref: f32,
+    /// Runtime-overridable sensory economics, so the question "does gating
+    /// long-range food detection behind eyes make eyes pay for themselves?"
+    /// can be answered by an A/B on one build rather than two.
+    pub blind_smell_range: i32,
+    pub sight_range_per_eye: i32,
+    pub part_metabolism: [f32; 7],
+    /// Runtime-overridable METABOLIC_EXPONENT, so the strength of the
+    /// large-body energy discount can be swept. 1.0 is the old linear cost.
+    pub metabolic_exponent: f32,
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
@@ -787,6 +816,10 @@ impl World {
             pathogen_damage_rate: PATHOGEN_DAMAGE_RATE,
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
             graze_mass_ref: GRAZE_MASS_REF,
+            blind_smell_range: FOOD_SMELL_RANGE_BLIND,
+            sight_range_per_eye: FOOD_SIGHT_RANGE_PER_EYE,
+            part_metabolism: PART_METABOLISM,
+            metabolic_exponent: METABOLIC_EXPONENT,
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
@@ -1139,6 +1172,14 @@ impl World {
             let flex: Vec<f32> = (0..count).map(|k| self.pixels.flex[offset + k]).collect();
             let storage: Vec<f32> = (0..count).map(|k| self.pixels.storage[offset + k]).collect();
             let part_size: Vec<f32> = (0..count).map(|k| self.pixels.size[offset + k]).collect();
+            // Girth is published SEPARATELY from size and must stay that way:
+            // the client's forward-kinematics port uses `part_size` for
+            // segment length and has to mirror the engine exactly, while the
+            // organ thickness profile applies only to how wide a part is.
+            // Folding the profile into `part_size` would silently shorten
+            // every tentacle on screen relative to where the engine actually
+            // put it.
+            let part_girth: Vec<f32> = (0..count).map(|k| crate::pixels::girth(&self.pixels, offset + k)).collect();
             // u32, not u8: PyO3 maps Vec<u8> to Python `bytes`, which orjson
             // refuses to serialize -- every publish then failed and the live
             // page froze at tick 0 while the simulation itself ran on fine.
@@ -1158,6 +1199,7 @@ impl World {
             d.set_item("flex", flex).unwrap();
             d.set_item("storage", storage).unwrap();
             d.set_item("part_size", part_size).unwrap();
+            d.set_item("part_girth", part_girth).unwrap();
             d.set_item("part_type", part_type).unwrap();
             d.set_item("mirror_sign", mirror_sign).unwrap();
             d.set_item("health_frac", health_frac).unwrap();
@@ -1319,6 +1361,37 @@ impl World {
     /// Test-only: the body's own anterior axis offset.
     fn debug_axis_offset(&self, id: u64) -> Option<f32> {
         self.individuals.id_to_slot.get(&id).map(|&s| self.individuals.axis_offset[s])
+    }
+
+    /// Test-only: overrides how far a creature can locate food with no eyes,
+    /// and how much each eye extends that. Setting blind range back up to the
+    /// sight range restores the old behaviour where foraging was ungated.
+    fn debug_set_smell_ranges(&mut self, blind: i32, per_eye: i32) {
+        self.blind_smell_range = blind;
+        self.sight_range_per_eye = per_eye;
+    }
+
+    /// Test-only: overrides per-part upkeep, indexed body, eye, mouth, gut,
+    /// tentacle, armor, flipper.
+    fn debug_set_part_metabolism(&mut self, v: Vec<f32>) {
+        for (i, x) in v.iter().take(7).enumerate() {
+            self.part_metabolism[i] = *x;
+        }
+    }
+
+    /// Test-only: the mean of the food field. The priority-effect hypothesis
+    /// for why identical settings give either a worm world or a large-bodied
+    /// one predicts the food field separates BEFORE body size does, so it has
+    /// to be observable.
+    fn debug_mean_food(&self) -> f32 {
+        let f = &self.fields.food;
+        if f.is_empty() { return 0.0; }
+        f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: overrides the Kleiber metabolic scaling exponent.
+    fn debug_set_metabolic_exponent(&mut self, v: f32) {
+        self.metabolic_exponent = v;
     }
 
     /// Test-only: overrides the thermal noise floor.
