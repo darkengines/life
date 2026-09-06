@@ -57,8 +57,17 @@ RECENT_CHUNKS = 8
 REWARD_LOSS_WEIGHT = 0.05
 # Reproduction is decisive but fires on ~0.5% of rows; energy change is dense
 # and available on every one. Both feed the learning signal.
-REPRO_SIGNAL_WEIGHT = 5.0
-ENERGY_SIGNAL_SCALE = 0.5
+# Reproduction is fitness; energy is only a means to it. The first weighting
+# had energy dense on every row and reproduction firing on ~0.5% of them, so
+# energy dominated the objective roughly a hundredfold and the policy learned
+# to HOARD: with instinct at 0.60 strength, mean energy tripled to 182 while
+# births fell 73% (7992 -> 2152) and bodies shrank. Higher standing population,
+# but a worse life history. Reproduction is now weighted to dominate, and
+# energy kept only as a weak shaping term toward it.
+REPRO_SIGNAL_WEIGHT = 60.0
+ENERGY_SIGNAL_SCALE = 0.05
+# Discount for crediting a reward back through the ticks that produced it.
+RETURN_DISCOUNT = 0.9
 # Advantage-weighted regression temperature and how hard the policy pulls on
 # the shared representation.
 AWR_TEMPERATURE = 1.0
@@ -149,7 +158,19 @@ def load_transitions(max_files=RECENT_CHUNKS):
             # means it is paying to exist. Combining them gives something
             # learnable that still treats reproduction as what matters most.
             denergy = energy[idx + 1] - energy[idx]
-            R.append(reward[idx] * REPRO_SIGNAL_WEIGHT + denergy * ENERGY_SIGNAL_SCALE)
+            step_r = (reward[idx] * REPRO_SIGNAL_WEIGHT
+                      + denergy * ENERGY_SIGNAL_SCALE).astype(np.float32)
+            # Credit reproduction BACKWARD over the logged trajectory, so the
+            # actions that led to breeding are reinforced rather than only the
+            # single tick it happened on. Without this, a reward that fires on
+            # ~0.5% of rows teaches almost nothing about how it was earned.
+            # Rows here are consecutive and sorted by (id, tick), so one
+            # reverse discounted pass gives each step the return that followed.
+            step_ids, step_ticks = ids[idx], ticks[idx]
+            for j in range(len(step_r) - 2, -1, -1):
+                if step_ids[j] == step_ids[j + 1] and step_ticks[j + 1] == step_ticks[j] + 1:
+                    step_r[j] += RETURN_DISCOUNT * step_r[j + 1]
+            R.append(step_r)
     if not S:
         return None
     return (np.concatenate(S), np.concatenate(A),

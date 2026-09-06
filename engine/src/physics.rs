@@ -1396,7 +1396,7 @@ pub fn tick(world: &mut World) {
                 // take it from there.
                 if let Some(policy) = world.shared_policy.take() {
                     crate::individuals::distill_policy(
-                        &mut world.individuals, child, &policy, crate::POLICY_DISTILL_RATE);
+                        &mut world.individuals, child, &policy, world.policy_distill_rate);
                     world.shared_policy = Some(policy);
                 }
                 // A child's root_pos is parent_pos + small random offset,

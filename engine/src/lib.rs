@@ -675,6 +675,11 @@ pub struct World {
     /// Runtime-overridable ANGULAR_DAMPING, so the balance between
     /// intentional turning and involuntary self-spin can be swept.
     pub angular_damping: f32,
+    /// Runtime-overridable POLICY_DISTILL_RATE, so how hard learned
+    /// instinct is pressed into newborns can be swept. At 1.0 a newborn
+    /// starts as an exact copy of the learned policy, which isolates
+    /// 'is the policy any good' from 'is the distillation strong enough'.
+    pub policy_distill_rate: f32,
     /// Runtime-overridable GRAVITY, so locomotion can be probed in
     /// isolation without sinking confounding the measurement.
     pub gravity: f32,
@@ -752,6 +757,7 @@ impl World {
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
             angular_damping: ANGULAR_DAMPING,
+            policy_distill_rate: POLICY_DISTILL_RATE,
             gravity: GRAVITY,
             shared_enc_w,
             shared_enc_b,
@@ -1214,6 +1220,9 @@ impl World {
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
     }
+
+    /// Test-only: overrides how hard learned instinct is pressed into newborns.
+    fn debug_set_policy_distill_rate(&mut self, v: f32) { self.policy_distill_rate = v; }
 
     /// Test-only: overrides angular damping.
     fn debug_set_angular_damping(&mut self, v: f32) { self.angular_damping = v; }
