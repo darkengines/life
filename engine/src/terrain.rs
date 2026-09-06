@@ -31,6 +31,9 @@ const N_ROCK_CLUSTERS: u32 = 26;
 const N_TUNNELS_PER_CLUSTER: u32 = 3;
 const TUNNEL_STEPS: u32 = 90;
 const N_CREVICE_POCKETS: u32 = 70;
+// Corridor half-width. Small bodies fit; large ones cannot manoeuvre.
+const TUNNEL_RADIUS: i32 = 2;
+const CREVICE_MOUTH_RADIUS: i32 = 1;
 
 pub struct Terrain {
     pub size: u32,
@@ -81,6 +84,13 @@ impl Terrain {
                 Some((x as u32 * size + y as u32) as usize)
             }
         };
+        // Passages have to be wide enough that a SMALL body actually fits,
+        // while still excluding large ones. Carving at radius 1 gave ~2-3
+        // cell corridors, which was fine while bodies could illegally embed
+        // in stone but became impassable to everything once rock was made
+        // genuinely solid -- at which point the reef stopped being a refuge
+        // and became a wall. A component collides by its own radius plus the
+        // repulsion range, so corridors need real clearance to admit anyone.
         let carve = |kind: &mut Vec<TerrainKind>, cx: i32, cy: i32, r: i32| {
             for dx in -r..=r {
                 for dy in -r..=r {
@@ -103,7 +113,7 @@ impl Terrain {
                 // somewhere instead of dissolving the whole mass into gravel.
                 let mut dir = rng.random_range(0.0..std::f32::consts::TAU);
                 for _ in 0..TUNNEL_STEPS {
-                    carve(&mut kind, x, y, 1);
+                    carve(&mut kind, x, y, TUNNEL_RADIUS);
                     dir += rng.random_range(-0.5..0.5);
                     x += (dir.cos() * 1.5).round() as i32;
                     y += (dir.sin() * 1.5).round() as i32;
@@ -120,7 +130,7 @@ impl Terrain {
         for _ in 0..N_CREVICE_POCKETS {
             let cx = rng.random_range(2..size as i32 - 2);
             let cy = rng.random_range(2..size as i32 - 2);
-            let outer = rng.random_range(3..6);
+            let outer = rng.random_range(5..9);
             for dx in -outer..=outer {
                 for dy in -outer..=outer {
                     let d2 = dx * dx + dy * dy;
@@ -137,7 +147,7 @@ impl Terrain {
             for step in 0..(outer + 2) {
                 let mx = cx + (mouth.cos() * step as f32).round() as i32;
                 let my = cy + (mouth.sin() * step as f32).round() as i32;
-                carve(&mut kind, mx, my, 0);
+                carve(&mut kind, mx, my, CREVICE_MOUTH_RADIUS);
             }
         }
 

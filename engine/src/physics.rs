@@ -684,10 +684,28 @@ pub fn tick(world: &mut World) {
         // hold prey there instead of it always symbolically snapping to the
         // head; nothing here decides that's good or picks where it forms.
         let anchor_pos = storage_anchor_position(world, slot, root_snapshot[slot]);
-        world.individuals.root_pos[target] = [
+        let dragged = [
             (anchor_pos[0] + jitter[0]).clamp(0.0, world.size as f32 - 1.0),
             (anchor_pos[1] + jitter[1]).clamp(0.0, world.size as f32 - 1.0),
         ];
+        // Dragging moved the prey by assignment, with no terrain check at
+        // all -- so a predator hauled its victim straight through solid rock.
+        // Measured, 13-24% of bodies had parts embedded in rock, and since
+        // anything already inside rock is deliberately allowed to keep moving
+        // (so being stuck is never permanent), those bodies then passed
+        // through walls indefinitely. That silently defeated the whole point
+        // of the reef: a passage is only a refuge if it cannot be dragged
+        // through. If the drag would put the prey in rock, it simply stays
+        // where it is; the grip holds, the geometry wins.
+        let drag_hits_rock = world_positions_at(world, target, world.sim_time, dragged)
+            .iter()
+            .any(|&p| {
+                let (cx, cy) = grid_xy(world, p);
+                world.terrain.at(cx, cy) == TerrainKind::Rock
+            });
+        if !drag_hits_rock {
+            world.individuals.root_pos[target] = dragged;
+        }
         let drain = world.individuals.energy[target].max(0.0).min(0.4);
         world.individuals.energy[target] -= drain;
         world.individuals.energy[slot] += drain;
@@ -1036,14 +1054,10 @@ pub fn tick(world: &mut World) {
             // a sand-surface correction that happened to land in rock.
             let current_shape = world_positions_at(world, slot, world.sim_time, old_root);
             let candidate_shape = world_positions_at(world, slot, world.sim_time, new_pos);
-            let currently_in_rock = current_shape.iter().any(|&p| {
-                let (cx, cy) = grid_xy(world, p);
-                world.terrain.at(cx, cy) == TerrainKind::Rock
-            });
-            let hits_rock = candidate_shape.iter().any(|&p| {
-                let (cx, cy) = grid_xy(world, p);
-                world.terrain.at(cx, cy) == TerrainKind::Rock
-            });
+            // Both tests use each part's own radius: a component is in rock
+            // if its BODY overlaps stone, not merely if its centre cell does.
+            let currently_in_rock = shape_overlaps_rock(world, slot, &current_shape);
+            let hits_rock = shape_overlaps_rock(world, slot, &candidate_shape);
             // If already inside rock, never permanently freeze there --
             // always allow this tick's move to proceed so there's a real
             // way out. This should be rare after growth/reproduction are
@@ -1066,9 +1080,23 @@ pub fn tick(world: &mut World) {
         if world.individuals.alive[slot] && !is_captured {
             let (x, y) = grid_xy(world, world.individuals.root_pos[slot]);
             let idx = (x * world.size + y) as usize;
+            // Grazing is a SMALL animal's living. A big body cannot support
+            // itself picking at scattered algae -- the food is dispersed and
+            // it simply cannot process enough of it -- so grazing yield falls
+            // away as mass rises. This is what creates an actual food chain
+            // rather than one undifferentiated crowd all eating the same
+            // thing: small creatures graze, and anything large enough that
+            // grazing no longer pays HAS to hunt, which is where predators
+            // (and any reason to be good at hunting) come from. Without it, a
+            // large animal could ignore prey entirely and still thrive, which
+            // is exactly what was happening -- 96 mean energy with predation
+            // optional.
+            let graze_mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
+            let graze_efficiency = 1.0 / (1.0 + graze_mass / world.graze_mass_ref);
             let eaten = world.fields.food[idx].min(crate::EAT_RATE * 0.1);
             world.fields.food[idx] -= eaten;
-            world.individuals.energy[slot] += eaten * 5.0 * digestion_multiplier(world, slot);
+            world.individuals.energy[slot] +=
+                eaten * 5.0 * graze_efficiency * digestion_multiplier(world, slot);
             world.individuals.ticks_since_fed[slot] += 1;
             if eaten > 0.001 {
                 world.individuals.ticks_since_fed[slot] = 0;
@@ -1337,6 +1365,37 @@ pub fn tick(world: &mut World) {
 /// twice as far. With a flat radius, large creatures repelled only within
 /// 1.2 units while being drawn several units across, so they visibly stacked
 /// and piled through one another -- they had no real physical extent.
+/// Does any component of this body, at its own bounding radius, overlap rock?
+///
+/// Treating parts as points let large components sink into stone centre-first;
+/// a component with real extent has to be tested by that extent.
+fn shape_overlaps_rock(world: &World, slot: usize, shape: &[[f32; 2]]) -> bool {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let scale = world.individuals.size_scale[slot];
+    shape.iter().enumerate().any(|(k, &p)| {
+        let r = world.pixels.size[offset + k] * scale * 0.5;
+        let span = (r.ceil() as i32).max(0);
+        let (gx, gy) = grid_xy(world, p);
+        for dx in -span..=span {
+            for dy in -span..=span {
+                let cx = gx as i32 + dx;
+                let cy = gy as i32 + dy;
+                if cx < 0 || cy < 0 || cx >= world.size as i32 || cy >= world.size as i32 {
+                    continue;
+                }
+                if world.terrain.at(cx as u32, cy as u32) != TerrainKind::Rock {
+                    continue;
+                }
+                let (ox, oy) = (cx as f32 + 0.5, cy as f32 + 0.5);
+                if ((p[0] - ox).powi(2) + (p[1] - oy).powi(2)).sqrt() < r + 0.5 {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
 fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &SpatialGrid, pos_cache: &[Option<Vec<[f32; 2]>>]) -> [f32; 2] {
     let mut push = [0f32; 2];
     let my_pos = world.individuals.root_pos[slot];
@@ -1370,6 +1429,51 @@ fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &Spatia
                 let overlap = reach - best_d;
                 push[0] += (p[0] - best[0]) / best_d * overlap * crate::COLLISION_STIFFNESS;
                 push[1] += (p[1] - best[1]) / best_d * overlap * crate::COLLISION_STIFFNESS;
+            }
+        }
+    }
+
+    // Rock pushes back. Rejecting a MOVE that would enter rock cannot keep
+    // bodies out of walls, because a body does not only move -- it undulates.
+    // A limb sweeps into stone through the bend wave alone, with the root
+    // never translating at all, and swim effort now widens that stroke on
+    // demand. Measured, ~18% of bodies still had parts embedded in rock even
+    // after terrain-checking every translation and every drag. A repulsion
+    // force handles what rejection structurally cannot, and it does it
+    // smoothly: bodies get pressed out of walls instead of being frozen
+    // against them, so narrow passages stay narrow and the reef stays a real
+    // refuge rather than something large animals can bulldoze through.
+    for (pi, &p) in ind_pos.iter().enumerate() {
+        // Every component has real extent, so it must collide by its own
+        // bounding radius rather than as a dimensionless point -- otherwise a
+        // large part's body sits inside stone while its centre is outside it,
+        // and the bigger the part the worse the overlap. This mirrors what
+        // creature-to-creature contact already does.
+        let part_radius = world.pixels.size[my_offset + pi] * my_scale * 0.5;
+        let reach = crate::TERRAIN_REPULSION_RANGE + part_radius;
+        let (gx, gy) = grid_xy(world, p);
+        let span = (reach.ceil() as i32).max(1);
+        for dx in -span..=span {
+            for dy in -span..=span {
+                let cx = gx as i32 + dx;
+                let cy = gy as i32 + dy;
+                if cx < 0 || cy < 0 || cx >= world.size as i32 || cy >= world.size as i32 {
+                    continue;
+                }
+                if world.terrain.at(cx as u32, cy as u32) != TerrainKind::Rock {
+                    continue;
+                }
+                // Push away from that cell's centre, strongest when deepest in.
+                let (ox, oy) = (cx as f32 + 0.5, cy as f32 + 0.5);
+                let (vx, vy) = (p[0] - ox, p[1] - oy);
+                let d = (vx * vx + vy * vy).sqrt();
+                if d < reach {
+                    let overlap = reach - d;
+                    if d > 1e-4 {
+                        push[0] += vx / d * overlap * crate::TERRAIN_REPULSION_STIFFNESS;
+                        push[1] += vy / d * overlap * crate::TERRAIN_REPULSION_STIFFNESS;
+                    }
+                }
             }
         }
     }

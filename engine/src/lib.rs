@@ -55,6 +55,15 @@ pub const MATE_RADIUS: f32 = 20.0;
 pub const BASE_METABOLISM: f32 = 0.02;
 pub const PER_PIXEL_METABOLISM: f32 = 0.015;
 pub const EAT_RATE: f32 = 2.0;
+// Body mass at which grazing yield is already halved. Small bodies live off
+// the food field; large ones have to eat other creatures. This is the single
+// mechanism that turns one undifferentiated crowd into trophic levels.
+// Swept against fixed seeds: at 6 nearly every creature was too large to feed
+// itself and the world collapsed to a single individual; at 30 mean energy
+// falls from ~96 to ~45 (reproduction threshold is ~20, so energy finally
+// MEANS something), starvation rises from 11% to 16% of deaths, population
+// stays healthy at 200-360, and genuinely large predators persist.
+pub const GRAZE_MASS_REF: f32 = 30.0;
 pub const MOVE_COST: f32 = 0.01;
 pub const MUTATION_STD: f32 = 0.15;
 pub const COLLISION_RADIUS: f32 = 1.2;
@@ -418,6 +427,10 @@ pub const TURN_RATE: f32 = 0.12;
 pub const MAX_SPEED: f32 = 3.0;
 pub const THERMAL_NOISE: f32 = 0.35;
 pub const COLLISION_STIFFNESS: f32 = 1.2;
+// Rock repulsion. Move-rejection alone cannot keep bodies out of walls,
+// because undulation puts limbs inside stone with no translation at all.
+pub const TERRAIN_REPULSION_RANGE: f32 = 1.4;
+pub const TERRAIN_REPULSION_STIFFNESS: f32 = 3.0;
 pub const GRAVITY: f32 = 0.22;
 
 // Density-dependent cannibalism used to be modeled as a hardcoded PRESSURE
@@ -602,6 +615,9 @@ pub struct World {
     // reason as pathogen_damage_rate: sweeping a compile-time constant
     // against a fixed seed is impossible in a single run.
     pub repro_cost_per_part: f32,
+    /// Runtime-overridable GRAZE_MASS_REF, so the trophic threshold can be
+    /// swept against fixed seeds instead of guessed at.
+    pub graze_mass_ref: f32,
 
     // The world's shared perception encoder (see individuals::encode). One
     // matrix for every creature alive, initialised randomly. A random
@@ -671,6 +687,7 @@ impl World {
             experience_log: Vec::new(),
             pathogen_damage_rate: PATHOGEN_DAMAGE_RATE,
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
+            graze_mass_ref: GRAZE_MASS_REF,
             shared_enc_w,
             shared_enc_b,
             shared_policy: None,
@@ -1127,6 +1144,11 @@ impl World {
         d.set_item("latent_dim", individuals::LATENT_DIM).unwrap();
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
+    }
+
+    /// Test-only: overrides the mass at which grazing yield halves.
+    fn debug_set_graze_mass_ref(&mut self, v: f32) {
+        self.graze_mass_ref = v;
     }
 
     /// Test-only: overrides the per-part reproduction cost for a sweep.
