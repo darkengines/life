@@ -525,6 +525,7 @@ pub const SWIM_GAIN_MAX: f32 = 1.9;
 // Turning as physics rather than assignment. The brain holds a body
 // curvature; fluid torque on that curved body rotates it, damped by water.
 pub const TURN_CURVATURE_SCALE: f32 = 0.9;
+pub const TURN_POSTURE_BIAS_SCALE: f32 = 0.35;
 pub const ROTATIONAL_INERTIA: f32 = 2.5;
 pub const ANGULAR_DAMPING: f32 = 2.0;
 pub const MAX_ANGULAR_SPEED: f32 = 2.5;

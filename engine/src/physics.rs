@@ -986,8 +986,20 @@ pub fn tick(world: &mut World) {
             // its own shape to go where it wants -- which is the whole point,
             // and is why the previous arrangement (assign a heading, rotate
             // the body to match) left pointing and moving unrelated.
+            let desired_mag = (move_x * move_x + move_y * move_y).sqrt().min(1.0);
+            let directional_steer = if desired_mag > 0.05 {
+                let desired_heading = move_y.atan2(move_x);
+                let heading_error = (desired_heading - world.individuals.heading[slot]
+                    + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                heading_error.sin() * desired_mag
+            } else {
+                0.0
+            };
+            let posture_bias = d[crate::individuals::TURN_BIAS_IDX] * crate::TURN_POSTURE_BIAS_SCALE;
             world.individuals.turn_curvature[slot] =
-                d[crate::individuals::TURN_BIAS_IDX] * crate::TURN_CURVATURE_SCALE;
+                (directional_steer + posture_bias).clamp(-1.0, 1.0) * crate::TURN_CURVATURE_SCALE;
 
             let inertia = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0)
                 * crate::ROTATIONAL_INERTIA;
