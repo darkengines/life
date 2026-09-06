@@ -888,6 +888,9 @@ pub fn tick(world: &mut World) {
             let attacker_size = body_size_sum(world, slot) * world.individuals.size_scale[slot];
             let victim_size = body_size_sum(world, target) * world.individuals.size_scale[target];
             let advantage = victim_size / attacker_size.max(0.01);
+            // A much larger victim should throw off a small attacker quickly.
+            // The old ceiling meant even a giant needed several ticks to shed
+            // a limpet, and with many attackers that is a permanent state.
             let escape = (crate::STRUGGLE_ESCAPE_BASE * advantage / grip_multiplier(world, slot))
                 .min(crate::STRUGGLE_ESCAPE_MAX);
             if world.rng.random::<f32>() < escape {
@@ -906,7 +909,18 @@ pub fn tick(world: &mut World) {
             // evenly-matched struggle stays a real, drawn-out contest.
             let attacker_size = body_size_sum(world, slot) * world.individuals.size_scale[slot];
             let victim_size = body_size_sum(world, target) * world.individuals.size_scale[target];
-            let dominance = (attacker_size / victim_size.max(0.01)).clamp(1.0, crate::CHEW_DOMINANCE_MAX);
+            // Being outmatched has to COST something. The lower clamp was 1.0,
+            // meaning a three-part creature latched onto a twenty-five-part
+            // armoured animal tore parts off at exactly the rate an
+            // equal-sized rival would -- so size bought no protection at all
+            // through this path, and big creatures were dismantled by small
+            // ones. Direct hits already respect armour (damage is power minus
+            // armour, and a small attacker's power is far below a large
+            // body's armour, so it lands nothing); chewing bypassed all of
+            // that. Now a small attacker can barely tear flesh from something
+            // much larger, which is what makes being big worth its upkeep.
+            let dominance = (attacker_size / victim_size.max(0.01))
+                .clamp(crate::CHEW_DOMINANCE_MIN, crate::CHEW_DOMINANCE_MAX);
             let chew_chance = (crate::CAPTURE_CHEW_CHANCE_BASE * bite_force * dominance)
                 .clamp(0.0, crate::CAPTURE_CHEW_CHANCE_MAX);
             if world.rng.random::<f32>() < chew_chance {

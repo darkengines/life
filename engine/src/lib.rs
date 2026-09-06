@@ -158,6 +158,10 @@ pub const GUT_DIGESTION_MAX: f32 = 3.0;
 // whatever it grabbed first for as long as a tiny meal took to finish, and
 // could never work through several small victims in succession.
 pub const CHEW_DOMINANCE_MAX: f32 = 8.0;
+// Floor on that ratio. Being much smaller than what you are biting must
+// reduce how fast you can tear it apart, or size buys no protection through
+// the capture path however armoured the victim is.
+pub const CHEW_DOMINANCE_MIN: f32 = 0.06;
 // One sweep can catch several victims: how much body mass buys each extra
 // simultaneous target. Without this a large animal landed a single blow per
 // tick while every small creature around it landed its own, which made size
@@ -177,7 +181,7 @@ pub const ENGULF_GAPE_MIN: f32 = 2.5;
 // sat permanently immobilised in a grip at any moment, and their captors
 // were inert too -- about half the world doing nothing.
 pub const STRUGGLE_ESCAPE_BASE: f32 = 0.05;
-pub const STRUGGLE_ESCAPE_MAX: f32 = 0.18;
+pub const STRUGGLE_ESCAPE_MAX: f32 = 0.45;
 pub const COLOR_MUTATION_RATE: f32 = 0.015;
 pub const COLOR_MUTATION_STD: f32 = 40.0;
 
