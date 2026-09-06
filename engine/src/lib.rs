@@ -37,8 +37,14 @@ use pixels::PixelArena;
 use terrain::{Terrain, TerrainKind};
 
 pub const JOINT_LEN: f32 = 1.0;
-pub const REPRODUCE_ENERGY_COST: f32 = 8.0;
-pub const REPRODUCE_ENERGY_THRESHOLD: f32 = 15.0;
+// Reproduction is priced by the offspring's actual body, not a flat fee --
+// see the reproduction gate in physics.rs for why the old flat cost was the
+// mechanism behind runaway population. Tuned so a minimal 2-part body pays
+// about what it used to (~6.4) while a 20-part animal pays ~28, which is a
+// real investment against a typical energy reserve in the low 30s.
+pub const REPRODUCE_BASE_COST: f32 = 4.0;
+pub const REPRODUCE_COST_PER_PART: f32 = 1.2;
+pub const REPRODUCE_ENERGY_BUFFER: f32 = 7.0;
 pub const MATURITY_AGE: f32 = 60.0;
 // Measured directly: at typical population density in this world size,
 // median nearest-neighbor distance is ~10.5 units -- the old 2.5 radius
@@ -59,8 +65,60 @@ pub const CAPTURE_BONUS: f32 = 2.0;
 // (potentially huge, lifetime-accumulated) energy total. See the attachment
 // loop in physics.rs for why the trickle alone let some captures run for
 // hundreds of ticks, visible as creatures "locked in the air".
-pub const CAPTURE_CHEW_CHANCE_BASE: f32 = 0.05;
+// Raised from 0.05 after measuring: at the old rate an evenly-matched
+// grapple took ~300 ticks to resolve, so captures accumulated until 44% of
+// the population was pinned in one at any moment. Predation should be
+// punctuated -- a short violent event -- not the world's default state.
+pub const CAPTURE_CHEW_CHANCE_BASE: f32 = 0.12;
 pub const CAPTURE_CHEW_CHANCE_MAX: f32 = 0.5;
+// --- Differentiated body parts (see pixels.rs). The engine's answer to
+// "bodies get bigger but never more complex": a plain pixel is structure,
+// but a part can specialise into an organ with a real function and a real
+// upkeep cost. Every organ is strictly worse than plain body tissue UNLESS
+// the animal is in a situation that uses it, which is what makes division of
+// labour a discovery rather than a freebie. Nothing scores a "good" body
+// plan; only these costs and effects exist.
+pub const PART_DIFFERENTIATION_CHANCE: f32 = 0.30; // odds a newly grown part is an organ rather than plain body
+// Upkeep multiplier applied to PER_PIXEL_METABOLISM, indexed by part kind
+// (body, eye, mouth, gut, tentacle, armor, flipper). Plain body is the
+// cheapest thing you can be made of.
+pub const PART_METABOLISM: [f32; 7] = [1.0, 1.4, 1.5, 1.3, 1.5, 1.8, 1.6];
+// Each eye extends how far this individual can see (multiplier on
+// VISION_RANGE), so a blind lump has to bump into the world while an
+// eye-heavy body can track threats and prey at distance -- at a cost.
+pub const EYE_VISION_BONUS: f32 = 0.35;
+pub const EYE_VISION_MAX: f32 = 3.0;
+// Mouths make bites land harder and prey get stripped faster.
+pub const MOUTH_BITE_BONUS: f32 = 0.45;
+pub const MOUTH_BITE_MAX: f32 = 3.5;
+// Tentacles grip: they raise the chance of latching onto something and make
+// the hold harder to struggle out of.
+pub const TENTACLE_GRIP_BONUS: f32 = 0.5;
+pub const TENTACLE_GRIP_MAX: f32 = 4.0;
+// Armor plating absorbs damage (effective toughness) but is heavy.
+pub const ARMOR_TOUGHNESS_BONUS: f32 = 0.4;
+pub const ARMOR_TOUGHNESS_MAX: f32 = 3.0;
+// Flippers convert the same swimming effort into more thrust.
+pub const FLIPPER_THRUST_BONUS: f32 = 0.3;
+pub const FLIPPER_THRUST_MAX: f32 = 2.5;
+// A gut extracts more from every meal, which is what makes grazing and
+// scavenging viable strategies next to predation.
+pub const GUT_DIGESTION_BONUS: f32 = 0.35;
+pub const GUT_DIGESTION_MAX: f32 = 3.0;
+
+// How much faster a predator strips prey that is far smaller than itself.
+// Consumption used to be size-blind, so a large animal was locked to
+// whatever it grabbed first for as long as a tiny meal took to finish, and
+// could never work through several small victims in succession.
+pub const CHEW_DOMINANCE_MAX: f32 = 8.0;
+// Prey struggling out of a grip. Per-tick escape odds are this base scaled
+// by the victim's size advantage, so something that grabbed prey larger
+// than itself loses it quickly while genuinely outmatched prey rarely gets
+// free. Measured need: without any escape path, a quarter of the population
+// sat permanently immobilised in a grip at any moment, and their captors
+// were inert too -- about half the world doing nothing.
+pub const STRUGGLE_ESCAPE_BASE: f32 = 0.05;
+pub const STRUGGLE_ESCAPE_MAX: f32 = 0.18;
 pub const COLOR_MUTATION_RATE: f32 = 0.015;
 pub const COLOR_MUTATION_STD: f32 = 40.0;
 
@@ -854,6 +912,10 @@ impl World {
             let flex: Vec<f32> = (0..count).map(|k| self.pixels.flex[offset + k]).collect();
             let storage: Vec<f32> = (0..count).map(|k| self.pixels.storage[offset + k]).collect();
             let part_size: Vec<f32> = (0..count).map(|k| self.pixels.size[offset + k]).collect();
+            // u32, not u8: PyO3 maps Vec<u8> to Python `bytes`, which orjson
+            // refuses to serialize -- every publish then failed and the live
+            // page froze at tick 0 while the simulation itself ran on fine.
+            let part_type: Vec<u32> = (0..count).map(|k| self.pixels.part_type[offset + k] as u32).collect();
             let health_frac: Vec<f32> = (0..count).map(|k| {
                 let max_health = BASE_PIXEL_HEALTH * self.pixels.size[offset + k];
                 if max_health > 0.0 { (self.pixels.health[offset + k] / max_health).clamp(0.0, 1.0) } else { 1.0 }
@@ -868,6 +930,7 @@ impl World {
             d.set_item("flex", flex).unwrap();
             d.set_item("storage", storage).unwrap();
             d.set_item("part_size", part_size).unwrap();
+            d.set_item("part_type", part_type).unwrap();
             d.set_item("health_frac", health_frac).unwrap();
             d.set_item("captured", captured_slots.contains(&slot)).unwrap();
             let c = self.individuals.color[slot];

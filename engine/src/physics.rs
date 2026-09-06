@@ -180,6 +180,60 @@ pub(crate) fn grid_xy(world: &World, pos: [f32; 2]) -> (u32, u32) {
 /// Janzen-Connell pathogen pressure in the tick loop; see
 /// PATHOGEN_DAMAGE_RATE in lib.rs. Accumulated inside the scan that was
 /// already happening for kin similarity, so it costs no extra traversal.
+// --- Body-part derived stats. All read the cached per-individual tally (see
+// individuals::recompute_part_counts), so these are a handful of arithmetic
+// ops rather than a pixel scan, and stay cheap enough to call in the hot
+// per-tick paths. Each is a plain multiplier with a ceiling: stacking twenty
+// eyes should help less and less, or a single degenerate "all one organ"
+// body plan would dominate and the interesting mixed anatomies would never
+// get a look in.
+fn part_bonus(world: &World, slot: usize, kind: u8, per_part: f32, cap: f32) -> f32 {
+    let n = world.individuals.part_counts[slot][kind as usize] as f32;
+    (1.0 + per_part * n).min(cap)
+}
+
+pub(crate) fn vision_range_of(world: &World, slot: usize) -> f32 {
+    crate::VISION_RANGE
+        * part_bonus(world, slot, crate::pixels::PART_EYE, crate::EYE_VISION_BONUS, crate::EYE_VISION_MAX)
+}
+
+pub(crate) fn bite_multiplier(world: &World, slot: usize) -> f32 {
+    part_bonus(world, slot, crate::pixels::PART_MOUTH, crate::MOUTH_BITE_BONUS, crate::MOUTH_BITE_MAX)
+}
+
+pub(crate) fn grip_multiplier(world: &World, slot: usize) -> f32 {
+    part_bonus(world, slot, crate::pixels::PART_TENTACLE, crate::TENTACLE_GRIP_BONUS, crate::TENTACLE_GRIP_MAX)
+}
+
+pub(crate) fn armor_multiplier(world: &World, slot: usize) -> f32 {
+    part_bonus(world, slot, crate::pixels::PART_ARMOR, crate::ARMOR_TOUGHNESS_BONUS, crate::ARMOR_TOUGHNESS_MAX)
+}
+
+/// A gut extracts more energy from the same meal. This is what makes a
+/// grazing or scavenging life history viable next to simply killing things:
+/// the same mouthful is worth more to a body that invested in digesting it.
+pub(crate) fn digestion_multiplier(world: &World, slot: usize) -> f32 {
+    let n = world.individuals.part_counts[slot][crate::pixels::PART_GUT as usize] as f32;
+    (1.0 + crate::GUT_DIGESTION_BONUS * n).min(crate::GUT_DIGESTION_MAX)
+}
+
+pub(crate) fn thrust_multiplier(world: &World, slot: usize) -> f32 {
+    part_bonus(world, slot, crate::pixels::PART_FLIPPER, crate::FLIPPER_THRUST_BONUS, crate::FLIPPER_THRUST_MAX)
+}
+
+/// Total metabolic upkeep multiplier for this body: every part costs, and
+/// specialised organs cost more than plain structural tissue. Returned as an
+/// effective part count so the caller's existing per-pixel formula is
+/// unchanged in shape.
+pub(crate) fn metabolic_part_load(world: &World, slot: usize) -> f32 {
+    let counts = &world.individuals.part_counts[slot];
+    let mut load = 0.0;
+    for kind in 0..crate::pixels::PART_KIND_COUNT as usize {
+        load += counts[kind] as f32 * crate::PART_METABOLISM[kind];
+    }
+    load
+}
+
 fn kin_similarity_nearest(world: &World, slot: usize, grid: &SpatialGrid) -> (f32, f32) {
     let pos = world.individuals.root_pos[slot];
     let my_sig = world.individuals.kin_signature[slot];
@@ -225,17 +279,21 @@ fn kin_similarity_nearest(world: &World, slot: usize, grid: &SpatialGrid) -> (f3
 /// enforced one.
 pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9] {
     let pos = world.individuals.root_pos[slot];
+    // Sight range is anatomical now: an eyeless body barely perceives past
+    // its own skin, while one that invested in eyes sees far enough to
+    // actually hunt or flee rather than blunder into things.
+    let range = vision_range_of(world, slot);
     let my_size = body_size_sum(world, slot) * world.individuals.size_scale[slot];
     let my_female = world.individuals.female[slot];
     let mut best_threat: Option<(f32, [f32; 2])> = None;
     let mut best_prey: Option<(f32, [f32; 2])> = None;
     let mut best_mate: Option<(f32, [f32; 2])> = None;
-    for other in grid.nearby_radius(pos, crate::VISION_RANGE) {
+    for other in grid.nearby_radius(pos, range) {
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
         let other_pos = world.individuals.root_pos[other];
         let d = dist(other_pos, pos);
-        if d > crate::VISION_RANGE || d < 1e-6 { continue; }
+        if d > range || d < 1e-6 { continue; }
         let other_size = body_size_sum(world, other) * world.individuals.size_scale[other];
         let delta = [other_pos[0] - pos[0], other_pos[1] - pos[1]];
         if other_size > my_size * 1.15 {
@@ -251,19 +309,19 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
     }
     let mut out = [0f32; 9];
     if let Some((d, delta)) = best_threat {
-        out[0] = delta[0] / crate::VISION_RANGE;
-        out[1] = delta[1] / crate::VISION_RANGE;
-        out[2] = 1.0 - d / crate::VISION_RANGE;
+        out[0] = delta[0] / range;
+        out[1] = delta[1] / range;
+        out[2] = 1.0 - d / range;
     }
     if let Some((d, delta)) = best_prey {
-        out[3] = delta[0] / crate::VISION_RANGE;
-        out[4] = delta[1] / crate::VISION_RANGE;
-        out[5] = 1.0 - d / crate::VISION_RANGE;
+        out[3] = delta[0] / range;
+        out[4] = delta[1] / range;
+        out[5] = 1.0 - d / range;
     }
     if let Some((d, delta)) = best_mate {
-        out[6] = delta[0] / crate::VISION_RANGE;
-        out[7] = delta[1] / crate::VISION_RANGE;
-        out[8] = 1.0 - d / crate::VISION_RANGE;
+        out[6] = delta[0] / range;
+        out[7] = delta[1] / range;
+        out[8] = 1.0 - d / range;
     }
     out
 }
@@ -376,6 +434,7 @@ fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
         // health to whatever stale data happened to occupy the freshly
         // (re)allocated block, corrupting evolved anatomy on every fight.
         world.pixels.storage[(new_offset + w) as usize] = world.pixels.storage[(offset + k) as usize];
+        world.pixels.part_type[(new_offset + w) as usize] = world.pixels.part_type[(offset + k) as usize];
         world.pixels.size[(new_offset + w) as usize] = world.pixels.size[(offset + k) as usize];
         world.pixels.min_angle[(new_offset + w) as usize] = world.pixels.min_angle[(offset + k) as usize];
         world.pixels.max_angle[(new_offset + w) as usize] = world.pixels.max_angle[(offset + k) as usize];
@@ -385,6 +444,7 @@ fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
     world.pixels.free(offset, count);
     world.individuals.pixel_offset[slot] = new_offset;
     world.individuals.pixel_count[slot] = new_count;
+    crate::individuals::recompute_part_counts(&mut world.individuals, &world.pixels, slot);
     new_count == 0
 }
 
@@ -610,9 +670,39 @@ pub fn tick(world: &mut World) {
         // This bounds worst-case capture time by the target's pixel COUNT
         // (fixed at birth, small) instead of its energy total, and ties
         // consumption speed to a trait evolution actually shapes.
+        // Prey struggles. Without this, any grip held until one party died,
+        // which is how a quarter of the population ended up permanently
+        // immobilised: a small attacker could lock a much larger victim
+        // forever simply by touching it first. Escape odds rise with the
+        // victim's size advantage, so a big animal shrugs off something that
+        // grabbed above its weight while genuinely smaller prey rarely gets
+        // away. This is also what stops capture from being a terminal state
+        // for the world's dynamism.
         if !released {
-            let bite_force = world.individuals.bite_force[slot];
-            let chew_chance = (crate::CAPTURE_CHEW_CHANCE_BASE * bite_force).clamp(0.0, crate::CAPTURE_CHEW_CHANCE_MAX);
+            let attacker_size = body_size_sum(world, slot) * world.individuals.size_scale[slot];
+            let victim_size = body_size_sum(world, target) * world.individuals.size_scale[target];
+            let advantage = victim_size / attacker_size.max(0.01);
+            let escape = (crate::STRUGGLE_ESCAPE_BASE * advantage / grip_multiplier(world, slot))
+                .min(crate::STRUGGLE_ESCAPE_MAX);
+            if world.rng.random::<f32>() < escape {
+                world.individuals.attached_to[slot] = -1;
+                released = true;
+            }
+        }
+        if !released {
+            let bite_force = world.individuals.bite_force[slot] * bite_multiplier(world, slot);
+            // Consumption scales with how outmatched the prey is. A flat rate
+            // meant a large predator spent just as long working through a
+            // tiny victim as a huge one, so it could never take several small
+            // meals in succession -- it was locked to whatever it grabbed
+            // first. Now a big animal strips something much smaller than
+            // itself in a few ticks and is free to hunt again, while an
+            // evenly-matched struggle stays a real, drawn-out contest.
+            let attacker_size = body_size_sum(world, slot) * world.individuals.size_scale[slot];
+            let victim_size = body_size_sum(world, target) * world.individuals.size_scale[target];
+            let dominance = (attacker_size / victim_size.max(0.01)).clamp(1.0, crate::CHEW_DOMINANCE_MAX);
+            let chew_chance = (crate::CAPTURE_CHEW_CHANCE_BASE * bite_force * dominance)
+                .clamp(0.0, crate::CAPTURE_CHEW_CHANCE_MAX);
             if world.rng.random::<f32>() < chew_chance {
                 let target_count = world.individuals.pixel_count[target];
                 if target_count > 0 {
@@ -620,7 +710,7 @@ pub fn tick(world: &mut World) {
                     let (hx, hy) = grid_xy(world, world.individuals.root_pos[target]);
                     let idx = (hx * world.size + hy) as usize;
                     let died = remove_pixel(world, target, victim);
-                    world.individuals.energy[slot] += crate::CORPSE_ENERGY_PER_PIXEL;
+                    world.individuals.energy[slot] += crate::CORPSE_ENERGY_PER_PIXEL * digestion_multiplier(world, slot);
                     world.fields.blood[idx] += crate::BLOOD_EMIT_ON_HIT;
                     if died {
                         kill(world, target);
@@ -636,8 +726,18 @@ pub fn tick(world: &mut World) {
         .filter_map(|&s| world.individuals.resolve_attached_target(s))
         .collect();
 
+    // Everyone alive gets to think, INCLUDING an individual currently holding
+    // prey. Excluding attackers here meant a predator that latched on stopped
+    // running its brain entirely until it finished chewing -- it went inert,
+    // could not steer, and could not move on to another meal. Measured, a
+    // quarter of the population was held captive at any moment and their
+    // captors were frozen alongside them, so roughly half the world was doing
+    // nothing on any given tick. That is most of why the simulation looked
+    // static and why "big creatures eating several small ones in a row" was
+    // impossible. A captive still can't move (see `is_captured` below), which
+    // is the part that should genuinely be immobilising.
     let deciding: Vec<usize> = alive_slots.iter().cloned()
-        .filter(|&s| world.individuals.alive[s] && world.individuals.attached_to[s] < 0)
+        .filter(|&s| world.individuals.alive[s])
         .collect();
 
     // One O(n) pass for the Red Queen pressure below: how much of the
@@ -766,12 +866,14 @@ pub fn tick(world: &mut World) {
             let anchor = if on_solid_ground { world.individuals.anchor_strength[slot].min(1.0) } else { 0.0 };
             let mobility = 1.0 - anchor;
 
+            // Flippers convert the same swimming effort into more thrust.
+            let fin = thrust_multiplier(world, slot);
             let noise = [normal(&mut world.rng, 0.0, crate::THERMAL_NOISE), normal(&mut world.rng, 0.0, crate::THERMAL_NOISE)];
             let gravity_force = [0.0, -crate::GRAVITY * mass];
             let vel = world.individuals.velocity[slot];
             let accel = [
-                (thrust[0] * mobility + contact[0] + gravity_force[0] + crawl_force[0] * mobility) / mass - crate::LINEAR_DAMPING * vel[0] + noise[0] * mobility / mass.sqrt(),
-                (thrust[1] * mobility + contact[1] + gravity_force[1] * mobility + crawl_force[1] * mobility) / mass - crate::LINEAR_DAMPING * vel[1] + noise[1] * mobility / mass.sqrt(),
+                (thrust[0] * mobility * fin + contact[0] + gravity_force[0] + crawl_force[0] * mobility) / mass - crate::LINEAR_DAMPING * vel[0] + noise[0] * mobility / mass.sqrt(),
+                (thrust[1] * mobility * fin + contact[1] + gravity_force[1] * mobility + crawl_force[1] * mobility) / mass - crate::LINEAR_DAMPING * vel[1] + noise[1] * mobility / mass.sqrt(),
             ];
             let mut new_vel = [vel[0] + accel[0] * world.dt, vel[1] + accel[1] * world.dt];
             let speed = (new_vel[0] * new_vel[0] + new_vel[1] * new_vel[1]).sqrt();
@@ -887,7 +989,7 @@ pub fn tick(world: &mut World) {
             let idx = (x * world.size + y) as usize;
             let eaten = world.fields.food[idx].min(crate::EAT_RATE * 0.1);
             world.fields.food[idx] -= eaten;
-            world.individuals.energy[slot] += eaten * 5.0;
+            world.individuals.energy[slot] += eaten * 5.0 * digestion_multiplier(world, slot);
             world.individuals.ticks_since_fed[slot] += 1;
             if eaten > 0.001 {
                 world.individuals.ticks_since_fed[slot] = 0;
@@ -902,7 +1004,7 @@ pub fn tick(world: &mut World) {
                 && world.individuals.anchor_strength[slot] > 0.05;
             let anchor_discount = if anchored_here { world.individuals.anchor_strength[slot].min(1.0) * crate::ANCHOR_METABOLISM_DISCOUNT } else { 0.0 };
             let metabolism = crate::BASE_METABOLISM
-                + crate::PER_PIXEL_METABOLISM * world.individuals.pixel_count[slot] as f32 * world.individuals.size_scale[slot] * (1.0 - anchor_discount)
+                + crate::PER_PIXEL_METABOLISM * metabolic_part_load(world, slot) * world.individuals.size_scale[slot] * (1.0 - anchor_discount)
                 // Immunity isn't free: keeping resistance up costs upkeep
                 // every tick, whether or not any pathogen is actually
                 // around. Without this the trait would simply ratchet to
@@ -982,15 +1084,30 @@ pub fn tick(world: &mut World) {
             let t_repro_0 = std::time::Instant::now();
             let recovery_ok = !world.individuals.female[slot]
                 || world.individuals.ticks_since_reproduced[slot] >= crate::FEMALE_REPRODUCTION_COOLDOWN;
+            // Building a child costs what the child actually IS. This was a
+            // flat 8.0 regardless of body size, which meant a thirty-part
+            // animal produced a thirty-one-part offspring for the same price
+            // a two-part blob paid for a three-part one -- biomass conjured
+            // from nothing, and no brake whatsoever on population. Charging
+            // per part makes body size a real life-history decision: small
+            // bodies breed cheaply and often, large ones invest heavily and
+            // rarely, and the population limits itself through the energy
+            // budget instead of slamming into an artificial cap.
+            let offspring_parts = world.individuals.pixel_count[slot] as f32 + 1.0;
+            let repro_cost = crate::REPRODUCE_BASE_COST
+                + crate::REPRODUCE_COST_PER_PART * offspring_parts;
+            // Must keep a survival buffer after paying, or reproducing would
+            // be a reliable way to starve immediately afterwards.
+            let repro_threshold = repro_cost + crate::REPRODUCE_ENERGY_BUFFER;
             if reproduce_urge > 0.3
-                && world.individuals.energy[slot] > crate::REPRODUCE_ENERGY_THRESHOLD
+                && world.individuals.energy[slot] > repro_threshold
                 && world.individuals.age[slot] as f32 >= crate::MATURITY_AGE * world.maturity_multiplier
                 && world.individuals.size_scale[slot] >= crate::ADULT_SIZE_SCALE
                 && world.individuals.ticks_since_fed[slot] < crate::RECENT_FEED_WINDOW
                 && recovery_ok
                 && has_nearby_mate(world, slot, &grid)
             {
-                world.individuals.energy[slot] -= crate::REPRODUCE_ENERGY_COST;
+                world.individuals.energy[slot] -= repro_cost;
                 world.individuals.ticks_since_reproduced[slot] = 0;
                 let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot);
                 // A child's root_pos is parent_pos + small random offset,

@@ -40,14 +40,37 @@ pub struct PixelArena {
     // with `size`, so a bigger part can absorb more before it's actually
     // severed -- see combat.rs.
     pub health: Vec<f32>,
+    // Differentiated body parts. Until now every pixel was mechanically the
+    // same lump with continuous modifiers, which is why bodies could get
+    // BIGGER but never more COMPLEX -- there was nothing for a part to
+    // specialise INTO, so a 20-pixel animal was just a longer worm, not an
+    // animal with organs. Each type carries a real function and a real
+    // metabolic cost (see PART_* in lib.rs), so division of labour becomes
+    // something selection can discover: an eye-heavy scout, a mouth-and-
+    // tentacle ambusher, a gut-heavy grazer, an armoured tank. Nothing
+    // rewards any particular combination -- only the costs and effects
+    // exist, exactly like every other trait here.
+    pub part_type: Vec<u8>,
     free_blocks: Vec<(u32, u32)>, // (offset, length), kept sorted by offset
 }
+
+/// Body-part kinds. Kept as a plain u8 in the arena (cheap to copy, cheap to
+/// publish to the frontend) with these constants as the vocabulary.
+pub const PART_BODY: u8 = 0;
+pub const PART_EYE: u8 = 1;
+pub const PART_MOUTH: u8 = 2;
+pub const PART_GUT: u8 = 3;
+pub const PART_TENTACLE: u8 = 4;
+pub const PART_ARMOR: u8 = 5;
+pub const PART_FLIPPER: u8 = 6;
+pub const PART_KIND_COUNT: u8 = 7;
 
 impl PixelArena {
     pub fn new() -> Self {
         PixelArena {
             parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), memory: Vec::new(), storage: Vec::new(),
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
+            part_type: Vec::new(),
             free_blocks: Vec::new(),
         }
     }
@@ -74,6 +97,7 @@ impl PixelArena {
         self.min_angle.resize(new_len as usize, -1.0);
         self.max_angle.resize(new_len as usize, 1.0);
         self.health.resize(new_len as usize, crate::BASE_PIXEL_HEALTH);
+        self.part_type.resize(new_len as usize, PART_BODY);
         offset
     }
 

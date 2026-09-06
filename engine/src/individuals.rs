@@ -72,6 +72,11 @@ pub struct Individuals {
     // DISEASE_RESISTANCE_METABOLIC_COST), so maxing it isn't free and the
     // arms race stays open rather than resolving to "everyone immune".
     pub disease_resistance: Vec<f32>,
+    // Cached count of each body-part kind (see pixels.rs). Derived data, not
+    // genome: recomputed only when a body actually changes (birth, growth, a
+    // part bitten off), so the per-tick effect lookups stay O(1) instead of
+    // rescanning every pixel of every individual every tick.
+    pub part_counts: Vec<[u8; crate::pixels::PART_KIND_COUNT as usize]>,
     pub memory_transmission_rate: Vec<f32>,
     pub weight_transmission_rate: Vec<f32>,
     // The STABLE ID (never a slot index) of whoever this individual is
@@ -150,6 +155,7 @@ impl Individuals {
             territoriality: Vec::with_capacity(cap),
             home_pos: Vec::with_capacity(cap),
             disease_resistance: Vec::with_capacity(cap),
+            part_counts: Vec::with_capacity(cap),
             memory_transmission_rate: Vec::with_capacity(cap),
             weight_transmission_rate: Vec::with_capacity(cap),
             attached_to: Vec::with_capacity(cap),
@@ -202,6 +208,7 @@ impl Individuals {
             self.territoriality.push(0.0);
             self.home_pos.push([0.0, 0.0]);
             self.disease_resistance.push(0.0);
+            self.part_counts.push([0; crate::pixels::PART_KIND_COUNT as usize]);
             self.memory_transmission_rate.push(0.0);
             self.weight_transmission_rate.push(0.0);
             self.attached_to.push(-1);
@@ -372,6 +379,23 @@ fn dir_to_angle(d: (i32, i32)) -> f32 {
 /// Tip-biased weighted growth: appends one pixel to an existing individual,
 /// matching pixel_world.py's `add_one_grown_pixel` exactly (grid-adjacent,
 /// strong bias toward extending a tip in its own direction).
+/// Recomputes an individual's cached body-part tally. Must be called after
+/// anything that changes its pixels: birth, growth, or losing a part in
+/// combat. Cheap (bodies are tens of pixels at most) and rare, which is the
+/// entire reason the counts are cached rather than derived per tick.
+pub fn recompute_part_counts(individuals: &mut Individuals, pixels: &PixelArena, slot: usize) {
+    let offset = individuals.pixel_offset[slot] as usize;
+    let count = individuals.pixel_count[slot] as usize;
+    let mut tally = [0u8; crate::pixels::PART_KIND_COUNT as usize];
+    for k in 0..count {
+        let t = pixels.part_type[offset + k] as usize;
+        if t < tally.len() {
+            tally[t] = tally[t].saturating_add(1);
+        }
+    }
+    individuals.part_counts[slot] = tally;
+}
+
 pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, slot: usize) -> bool {
     let offset = individuals.pixel_offset[slot];
     let count = individuals.pixel_count[slot];
@@ -429,6 +453,7 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[offset as usize + k];
         pixels.max_angle[new_offset as usize + k] = pixels.max_angle[offset as usize + k];
         pixels.health[new_offset as usize + k] = pixels.health[offset as usize + k];
+        pixels.part_type[new_offset as usize + k] = pixels.part_type[offset as usize + k];
     }
     let parent_flex = pixels.flex[new_offset as usize + parent_local];
     let parent_storage = pixels.storage[new_offset as usize + parent_local];
@@ -446,6 +471,17 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
         inherit_scalar(rng, parent_max_angle, crate::PART_ANGLE_MUTATION_STD, -std::f32::consts::PI, std::f32::consts::PI),
     );
     if new_min > new_max { std::mem::swap(&mut new_min, &mut new_max); }
+    // A new part is usually plain body; occasionally it differentiates into
+    // an organ. Specialisation being RARE per birth is the point -- an animal
+    // with a useful set of organs has to accumulate them over generations and
+    // keep paying for them, so it only persists if the combination actually
+    // earns its upkeep. Nothing here biases which organ appears.
+    pixels.part_type[new_offset as usize + count as usize] =
+        if rng.random::<f32>() < crate::PART_DIFFERENTIATION_CHANCE {
+            rng.random_range(1..crate::pixels::PART_KIND_COUNT)
+        } else {
+            crate::pixels::PART_BODY
+        };
     pixels.size[new_offset as usize + count as usize] = new_size;
     pixels.min_angle[new_offset as usize + count as usize] = new_min;
     pixels.max_angle[new_offset as usize + count as usize] = new_max;
@@ -456,6 +492,7 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
     }
     individuals.pixel_offset[slot] = new_offset;
     individuals.pixel_count[slot] = count + 1;
+    recompute_part_counts(individuals, pixels, slot);
     true
 }
 
@@ -521,6 +558,8 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     individuals.parent_id[slot] = -1;
     individuals.pixel_offset[slot] = offset;
     individuals.pixel_count[slot] = 1;
+    pixels.part_type[offset as usize] = crate::pixels::PART_BODY;
+    recompute_part_counts(individuals, pixels, slot);
     individuals.randomize_brain(slot, rng);
     individuals.id_to_slot.insert(individuals.id[slot], slot);
     slot
@@ -541,6 +580,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
         pixels.rest_angle[new_offset as usize + k] = pixels.rest_angle[parent_offset as usize + k];
         pixels.flex[new_offset as usize + k] = pixels.flex[parent_offset as usize + k];
         pixels.storage[new_offset as usize + k] = pixels.storage[parent_offset as usize + k];
+        pixels.part_type[new_offset as usize + k] = pixels.part_type[parent_offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[parent_offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[parent_offset as usize + k];
         pixels.max_angle[new_offset as usize + k] = pixels.max_angle[parent_offset as usize + k];
@@ -606,6 +646,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
     let wt_rate = individuals.weight_transmission_rate[child];
     individuals.inherit_brain(parent, child, wt_rate, rng);
 
+    recompute_part_counts(individuals, pixels, child);
     grow_one_pixel(individuals, pixels, rng, child); // one body-plan variation at birth, matches Python
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to

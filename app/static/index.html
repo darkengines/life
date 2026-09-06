@@ -451,6 +451,30 @@ const OUTLINE_SCALE = 1.35, FILL_SCALE = 1.0;
 // individual into one big instance buffer, upload once, draw once. See the
 // initGL() comment above for why this replaces per-individual/per-segment
 // canvas calls.
+// Organ palette, indexed by the engine's part-type ids (see pixels.rs:
+// body, eye, mouth, gut, tentacle, armor, flipper). Each organ is drawn as
+// its lineage colour blended toward a recognisable tint, so you can read a
+// creature's anatomy at a glance while its lineage identity still comes
+// through -- an eye-studded hunter and an armoured grazer of the same
+// lineage should look related but obviously differently built. Plain body
+// tissue is left untinted so the organs are what stands out.
+const PART_TINT = [
+  null,                        // body: lineage colour, untouched
+  [0.96, 0.98, 1.00, 0.80],    // eye: near-white, high blend so it reads as a lens
+  [0.72, 0.10, 0.14, 0.70],    // mouth: dark red
+  [0.85, 0.62, 0.22, 0.55],    // gut: amber
+  [0.62, 0.35, 0.85, 0.60],    // tentacle: violet
+  [0.62, 0.66, 0.72, 0.65],    // armor: steel grey
+  [0.35, 0.78, 0.92, 0.60],    // flipper: pale cyan
+];
+
+function tintFor(partType, r, g, b) {
+  const t = PART_TINT[partType | 0];
+  if (!t) return [r, g, b];
+  const w = t[3];
+  return [r + (t[0] - r) * w, g + (t[1] - g) * w, b + (t[2] - b) * w];
+}
+
 function drawBodiesGPU(bodies) {
   let count = 0;
   for (const b of bodies) count += Math.max(1, b.pts.length - 1) + 1; // segments (or 1 if none) + the root's own cap
@@ -474,6 +498,7 @@ function drawBodiesGPU(bodies) {
     const n = b.colors.length || 1;
     wr = (wr / n) / 255; wg = (wg / n) / 255; wb = (wb / n) / 255;
     const fillA = 0.85 * b.healthAlpha, outlineA = 0.95 * b.healthAlpha;
+    const types = b.ind.part_type;
     const oc0 = 225 / 255, oc1 = 232 / 255, oc2 = 240 / 255;
     for (let i = 0; i < b.pts.length; i++) {
       const parent = b.ind.parents[i];
@@ -483,7 +508,9 @@ function drawBodiesGPU(bodies) {
       buf[o+0] = b.pts[parent][0]; buf[o+1] = b.pts[parent][1];
       buf[o+2] = b.pts[i][0]; buf[o+3] = b.pts[i][1];
       buf[o+4] = fillRad; buf[o+5] = outlineWidth;
-      buf[o+6] = wr; buf[o+7] = wg; buf[o+8] = wb; buf[o+9] = fillA;
+      const pt = types ? types[i] : 0;
+      const [cr, cg, cb] = tintFor(pt, wr, wg, wb);
+      buf[o+6] = cr; buf[o+7] = cg; buf[o+8] = cb; buf[o+9] = fillA;
       buf[o+10] = oc0; buf[o+11] = oc1; buf[o+12] = oc2; buf[o+13] = outlineA;
       o += GPU_FLOATS_PER_INSTANCE;
     }
@@ -496,7 +523,8 @@ function drawBodiesGPU(bodies) {
     buf[o+0] = b.pts[0][0]; buf[o+1] = b.pts[0][1];
     buf[o+2] = b.pts[0][0]; buf[o+3] = b.pts[0][1];
     buf[o+4] = rootRad; buf[o+5] = rootOutline;
-    buf[o+6] = wr; buf[o+7] = wg; buf[o+8] = wb; buf[o+9] = fillA;
+    const [rr, rg, rb] = tintFor(types ? types[0] : 0, wr, wg, wb);
+    buf[o+6] = rr; buf[o+7] = rg; buf[o+8] = rb; buf[o+9] = fillA;
     buf[o+10] = oc0; buf[o+11] = oc1; buf[o+12] = oc2; buf[o+13] = outlineA;
     o += GPU_FLOATS_PER_INSTANCE;
   }

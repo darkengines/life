@@ -24,7 +24,11 @@ use crate::World;
 /// pixels or 30.
 pub fn effective_toughness(world: &World, target: usize) -> f32 {
     let mass = crate::physics::body_size_sum(world, target) * world.individuals.size_scale[target];
-    world.individuals.toughness[target] + crate::TOUGHNESS_SIZE_SCALING * mass
+    // Armor plating is real protection on top of the evolved trait and raw
+    // mass -- the anatomical route to being hard to kill, as opposed to the
+    // simply-being-enormous route.
+    (world.individuals.toughness[target] + crate::TOUGHNESS_SIZE_SCALING * mass)
+        * crate::physics::armor_multiplier(world, target)
 }
 
 /// How hard `attacker` is hitting right now, via one of its own pixels
