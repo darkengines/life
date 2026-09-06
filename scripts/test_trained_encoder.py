@@ -1,14 +1,18 @@
 """Does the GPU-trained perception encoder actually improve behaviour?
 
 The architecture splits perception (shared, trainable) from decision (private,
-evolved). The trainer has learned an encoder that predicts the world 5x better
-than a "nothing changes" baseline -- but predictive quality is not the point.
-The point is whether creatures that perceive through it behave better.
+evolved). The trainer learns an encoder that predicts the world several times
+better than a "nothing changes" baseline -- but predictive quality is not the
+point. The point is whether creatures perceiving through it behave better.
 
-Same seed, same everything, one variable: the shared encoder is either the
-world's random initialisation or the trained weights. Behaviour is scored the
-same way as test_behaviour.py -- alignment with fleeing, chasing and mating --
-so the two are directly comparable.
+Same seeds, same everything, one variable: the shared encoder is either the
+world's random initialisation or the trained weights.
+
+MEASUREMENT NOTE: a first attempt scored only the final frame, giving ~100
+sighted samples whose standard error (~0.11) was larger than the effects being
+measured -- the result was uninterpretable. This samples throughout each run
+and pools across seeds, and prints an explicit noise band so a difference is
+never read as real when it isn't.
 """
 import math
 import sys
@@ -19,41 +23,49 @@ import rust_world
 
 VAR = Path(__file__).resolve().parent.parent / "var"
 WEIGHTS = VAR / "shared_encoder.npz"
-W, POP_CAP, SEED, TICKS = 240, 6000, 11, 3000
+W, POP_CAP, TICKS = 240, 6000, 3000
 VISION = 12.0
+SEEDS = (11, 22, 33, 44)
+WARMUP = 800
+SAMPLE_EVERY = 100
+KINDS = ("flee", "chase", "mate")
 
 
 def body_size(i):
     return len(i["positions"]) * i.get("size_scale", 1.0)
 
 
-def measure(w):
+def sample_alignment(w):
+    """Mean cosine between heading and each behaviour's ideal direction.
+
+    Scored for SIGHTED individuals only: a blind creature cannot be
+    responding to something it sees, so including them only adds noise.
+    """
     inds = w.individuals_state()
     if len(inds) < 20:
         return None
-    cell = VISION
     grid = {}
     for i in inds:
         x, y = i["positions"][0]
-        grid.setdefault((int(x // cell), int(y // cell)), []).append(i)
+        grid.setdefault((int(x // VISION), int(y // VISION)), []).append(i)
 
     def neighbours(i):
         x, y = i["positions"][0]
-        cx, cy = int(x // cell), int(y // cell)
+        cx, cy = int(x // VISION), int(y // VISION)
         out = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 out += grid.get((cx + dx, cy + dy), [])
         return out
 
-    acc = {k: [0.0, 0] for k in ("flee", "chase", "mate")}
-    sighted = {k: [0.0, 0] for k in ("flee", "chase", "mate")}
+    acc = {k: [0.0, 0] for k in KINDS}
     for i in inds:
+        if not any(t == 1 for t in i.get("part_type", [])):
+            continue  # blind
         x, y = i["positions"][0]
         my = body_size(i)
         hx, hy = math.cos(i["heading"]), math.sin(i["heading"])
-        eyes = sum(1 for t in i.get("part_type", []) if t == 1)
-        best, bestd = {}, {"flee": 1e9, "chase": 1e9, "mate": 1e9}
+        best, bestd = {}, {k: 1e9 for k in KINDS}
         for o in neighbours(i):
             if o is i:
                 continue
@@ -67,53 +79,65 @@ def measure(w):
                 bestd[kind], best[kind] = d, (ox - x, oy - y, d)
             if o.get("female") != i.get("female") and d < bestd["mate"]:
                 bestd["mate"], best["mate"] = d, (ox - x, oy - y, d)
-        for kind, v in best.items():
-            dx, dy, d = v
+        for kind, (dx, dy, d) in best.items():
             want = -1.0 if kind == "flee" else 1.0
-            cos = (hx * (dx / d) + hy * (dy / d)) * want
-            acc[kind][0] += cos
+            acc[kind][0] += (hx * (dx / d) + hy * (dy / d)) * want
             acc[kind][1] += 1
-            if eyes > 0:
-                sighted[kind][0] += cos
-                sighted[kind][1] += 1
-    return acc, sighted, len(inds)
+    return acc
 
 
-def run(label, use_trained):
-    w = rust_world.World(W, 0.03, 1.0, POP_CAP, SEED, 50)
+def run_seed(seed, use_trained):
+    w = rust_world.World(W, 0.03, 1.0, POP_CAP, seed, 50)
     if use_trained:
-        if not WEIGHTS.exists():
-            print("no trained weights on disk yet"); sys.exit(1)
         d = np.load(WEIGHTS)
-        ok = w.set_shared_encoder(d["w"].astype(np.float32).tolist(),
-                                  d["b"].astype(np.float32).tolist())
-        if not ok:
-            print("trained weights rejected (shape mismatch)"); sys.exit(1)
+        if not w.set_shared_encoder(d["w"].astype(np.float32).tolist(),
+                                    d["b"].astype(np.float32).tolist()):
+            print("trained weights rejected (shape mismatch)")
+            sys.exit(1)
     w.spawn_random(300)
-    for _ in range(TICKS):
+    totals = {k: [0.0, 0] for k in KINDS}
+    for t in range(1, TICKS + 1):
         w.tick()
-    r = measure(w)
-    if r is None:
-        print(f"{label}: collapsed")
-        return None
-    acc, sighted, pop = r
-    out = {}
-    line = []
-    for k in ("flee", "chase", "mate"):
-        t, n = acc[k]
-        st, sn = sighted[k]
-        out[k] = t / n if n else float("nan")
-        out[k + "_sighted"] = st / sn if sn else float("nan")
-        line.append(f"{k}={out[k]:+.4f} (sighted {out[k+'_sighted']:+.4f}, n={sn})")
-    print(f"{label}: pop={pop}\n    " + "\n    ".join(line), flush=True)
-    return out
+        if t >= WARMUP and t % SAMPLE_EVERY == 0:
+            s = sample_alignment(w)
+            if s is None:
+                continue
+            for k in KINDS:
+                totals[k][0] += s[k][0]
+                totals[k][1] += s[k][1]
+    return totals
 
 
-print("Random vs GPU-trained shared perception encoder\n")
-rnd = run("random encoder ", False)
-trn = run("trained encoder", True)
-if rnd and trn:
-    print("\ndifference (trained - random):")
-    for k in ("flee", "chase", "mate"):
-        print(f"    {k:>5}: {trn[k]-rnd[k]:+.4f}   sighted: "
-              f"{trn[k+'_sighted']-rnd[k+'_sighted']:+.4f}")
+if not WEIGHTS.exists():
+    print("no trained weights on disk yet -- run app/train_encoder.py first")
+    sys.exit(1)
+
+print("Random vs GPU-trained shared perception encoder")
+print(f"seeds={SEEDS}, sampled every {SAMPLE_EVERY} ticks after tick {WARMUP}\n")
+
+results = {}
+for cond, use_trained in (("random", False), ("trained", True)):
+    pooled = {k: [0.0, 0] for k in KINDS}
+    for seed in SEEDS:
+        t = run_seed(seed, use_trained)
+        for k in KINDS:
+            pooled[k][0] += t[k][0]
+            pooled[k][1] += t[k][1]
+        print(f"  {cond:>7} seed {seed}: " + "  ".join(
+            f"{k}={(t[k][0]/t[k][1] if t[k][1] else float('nan')):+.4f}(n={t[k][1]})"
+            for k in KINDS), flush=True)
+    results[cond] = pooled
+    print()
+
+print("pooled across seeds:")
+for k in KINDS:
+    rs, rn = results["random"][k]
+    ts, tn = results["trained"][k]
+    rm = rs / rn if rn else float("nan")
+    tm = ts / tn if tn else float("nan")
+    # 2 sigma on the difference of two mean cosines (unit-variance worst case)
+    band = 2.0 * math.sqrt(1.0 / max(1, rn) + 1.0 / max(1, tn))
+    diff = tm - rm
+    verdict = "MEANINGFUL" if abs(diff) > band else "within noise"
+    print(f"  {k:>5}: random {rm:+.4f} (n={rn:>6})   trained {tm:+.4f} (n={tn:>6})   "
+          f"diff {diff:+.4f} +/-{band:.4f}  -> {verdict}")

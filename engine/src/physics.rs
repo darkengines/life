@@ -871,6 +871,13 @@ pub fn tick(world: &mut World) {
         world.individuals.age[slot] += 1;
         let is_captured = attached_targets.contains(&slot);
 
+        // Reward is a PER-TICK quantity, so it is cleared every tick for
+        // everyone rather than only for individuals being logged. Clearing
+        // only on sampling made each logged row carry everything accumulated
+        // since that individual was last sampled -- up to ~200 ticks of
+        // reproductions collapsed onto one row (observed reaching 28), which
+        // is not a per-step reward at all and wrecked the training targets.
+        world.individuals.pending_reward[slot] = 0.0;
         let (d, thrust, contact, _, _) = &pre[i];
         // Negative frequency-dependent selection (Red Queen / rare-type
         // advantage): a specialist pathogen tracks whichever host is

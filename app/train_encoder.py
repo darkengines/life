@@ -45,6 +45,9 @@ STEPS_PER_ROUND = 400
 BATCH = 4096
 LR = 1e-3
 MIN_ROWS = 4000           # don't bother training on a trickle
+# Reward is far sparser and larger in scale than the sense vector, so it needs
+# a modest weight or it dominates the representation the encoder learns.
+REWARD_LOSS_WEIGHT = 0.05
 
 
 class WorldModel(nn.Module):
@@ -136,27 +139,40 @@ def main():
             opt = torch.optim.Adam(model.parameters(), lr=LR)
             print(f"[trainer] model {sense_dim}->{LATENT_DIM}, act {act_dim}", flush=True)
 
+        # Guard against a single pathological row wrecking a round: the
+        # simulation is a live system and a malformed or extreme value should
+        # degrade training, not destroy it.
+        R = np.clip(np.nan_to_num(R, nan=0.0, posinf=0.0, neginf=0.0), -10.0, 10.0)
+        S = np.nan_to_num(S, nan=0.0, posinf=0.0, neginf=0.0)
+        S2 = np.nan_to_num(S2, nan=0.0, posinf=0.0, neginf=0.0)
+
         S_t = torch.from_numpy(S).float().to(dev)
         A_t = torch.from_numpy(A).float().to(dev)
         R_t = torch.from_numpy(R).float().to(dev)
         S2_t = torch.from_numpy(S2).float().to(dev)
 
         model.train()
-        last = 0.0
+        last_state, last_reward = 0.0, 0.0
         for step in range(STEPS_PER_ROUND):
             i = torch.randint(0, len(S_t), (min(BATCH, len(S_t)),), device=dev)
             _z, pred_next, pred_r = model(S_t[i], A_t[i])
-            loss = nn.functional.mse_loss(pred_next, S2_t[i]) \
-                + 0.1 * nn.functional.mse_loss(pred_r, R_t[i])
+            state_loss = nn.functional.mse_loss(pred_next, S2_t[i])
+            reward_loss = nn.functional.mse_loss(pred_r, R_t[i])
+            loss = state_loss + REWARD_LOSS_WEIGHT * reward_loss
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            last = float(loss.item())
+            last_state = float(state_loss.item())
+            last_reward = float(reward_loss.item())
 
-        # A baseline of "predict no change" makes the loss meaningful: below
-        # it, the representation is carrying real predictive information.
+        # The only honest baseline for the state head is "predict no change".
+        # Reporting the COMBINED loss against it was apples-to-oranges: the
+        # combined figure carries the reward term too, so a perfectly healthy
+        # state prediction looked like a regression.
         with torch.no_grad():
             naive = float(nn.functional.mse_loss(S_t, S2_t).item())
+            reward_var = float(R_t.var().item())
 
         w = model.encoder.weight.detach().cpu().numpy().astype(np.float32)
         b = model.encoder.bias.detach().cpu().numpy().astype(np.float32)
@@ -165,10 +181,14 @@ def main():
         os.replace(tmp, WEIGHTS_PATH)   # atomic, so the sim never reads a half-written file
 
         round_no += 1
-        print(f"[trainer] round {round_no}: {len(S_t)} transitions, "
-              f"loss {last:.5f} vs naive {naive:.5f} -> weights written", flush=True)
+        skill = naive / last_state if last_state > 1e-12 else float("inf")
+        print(f"[trainer] round {round_no}: {len(S_t)} transitions | "
+              f"state {last_state:.6f} vs naive {naive:.6f} ({skill:.2f}x) | "
+              f"reward {last_reward:.5f} vs var {reward_var:.5f} -> weights written",
+              flush=True)
         write_status(state="trained", round=round_no, transitions=int(len(S_t)),
-                     loss=last, naive_loss=naive, device=dev)
+                     state_loss=last_state, naive_loss=naive, skill_vs_naive=skill,
+                     reward_loss=last_reward, reward_var=reward_var, device=dev)
         time.sleep(TRAIN_INTERVAL)
 
 
