@@ -17,3 +17,6 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+
+# Claude Code workspace config
+/.claude/
