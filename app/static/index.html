@@ -1,0 +1,1033 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pixel-Growth Ecosystem</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0b0f14; color: #ddd; padding: 20px; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  #stats { font-size: 13px; color: #9fb; margin-bottom: 6px; }
+  #weather-banner { font-size: 13px; margin-bottom: 10px; min-height: 1.2em; color: #ffd88a; }
+  canvas { background: #05070a; border: 1px solid #2a3444; border-radius: 4px; }
+  .canvas-stack { position: relative; width: 1200px; height: 1200px; }
+  .canvas-stack canvas { position: absolute; top: 0; left: 0; }
+  #bodies-gl, #overlay { background: transparent; border: none; pointer-events: none; }
+  .layout { display: flex; gap: 18px; align-items: flex-start; }
+  .side { display: flex; flex-direction: column; gap: 14px; min-width: 480px; }
+  #species { font-size: 11px; border-collapse: collapse; }
+  #species th, #species td { padding: 3px 6px; text-align: right; border-bottom: 1px solid #1c2531; }
+  #species th:first-child, #species td:first-child { text-align: left; }
+  #species th { color: #9fb; font-weight: 600; }
+  .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .panel-title { font-size: 13px; color: #9fb; margin: 0 0 6px; }
+  #chronicle { font-size: 12px; line-height: 1.6; max-height: 200px; overflow-y: auto;
+               background: #0e1420; border: 1px solid #1c2531; border-radius: 4px; padding: 8px 10px; }
+  #chronicle div { color: #cfe; }
+  #chronicle div:first-child { color: #fff; font-weight: 600; }
+  #chronicle .tick { color: #6a8; margin-right: 6px; }
+  .toggles { font-size: 12px; display: flex; gap: 14px; margin-bottom: 6px; flex-wrap: wrap; }
+  .toggles label { cursor: pointer; user-select: none; }
+  #history { background: #0e1420; border: 1px solid #1c2531; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>Pixel-Growth Ecosystem</h1>
+<div id="stats">connecting...</div>
+<div id="weather-banner"></div>
+<div class="toggles">
+  <label><input type="checkbox" id="show-pheromone" checked> pheromone</label>
+  <label><input type="checkbox" id="show-blood" checked> blood</label>
+  <label><input type="checkbox" id="show-acid" checked> acid</label>
+  <label><input type="checkbox" id="show-light" checked> light</label>
+  <label><input type="checkbox" id="show-quorum" checked> quorum</label>
+  <label><input type="checkbox" id="show-trails" checked> trails</label>
+  <label><input type="checkbox" id="show-corpses" checked> corpses</label>
+  <button id="reset-btn" type="button">Reset simulation</button>
+  <span style="margin-left:8px;">speed:
+    <select id="speed-select">
+      <option value="1">x1 (real time)</option>
+      <option value="2">x2</option>
+      <option value="4">x4</option>
+      <option value="8">x8</option>
+      <option value="16">x16</option>
+      <option value="32">x32</option>
+      <option value="" selected>variable (fastest)</option>
+    </select>
+  </span>
+</div>
+<div class="layout">
+<div class="canvas-stack">
+  <canvas id="world" width="1200" height="1200"></canvas>
+  <canvas id="bodies-gl" width="1200" height="1200"></canvas>
+  <canvas id="overlay" width="1200" height="1200"></canvas>
+</div>
+<div class="side">
+  <div>
+    <p class="panel-title">World Chronicle</p>
+    <div id="chronicle">listening...</div>
+  </div>
+  <div>
+    <p class="panel-title">Population &amp; Lineage History</p>
+    <canvas id="history" width="460" height="110"></canvas>
+  </div>
+  <div>
+    <p class="panel-title">Species (grouped by inherited lineage)</p>
+    <table id="species">
+      <thead><tr>
+        <th>lineage</th><th>pop</th><th>size</th><th>energy</th>
+        <th>bend</th><th>bite</th><th>tough</th><th>stick</th>
+        <th>crawl</th><th>acid</th><th>light</th><th>resist</th>
+      </tr></thead>
+      <tbody id="species-body"></tbody>
+    </table>
+  </div>
+</div>
+</div>
+
+<script>
+const canvas = document.getElementById('world');
+const ctx = canvas.getContext('2d');
+const overlayCanvas = document.getElementById('overlay');
+const octx = overlayCanvas.getContext('2d');
+const histCanvas = document.getElementById('history');
+const histCtx = histCanvas.getContext('2d');
+const trails = new Map();  // individual id -> array of recent root [x,y]
+let lastChronicleLen = 0;
+let pinnedColor = null; // [r,g,b] of a species table row clicked to track it on the canvas, or null
+let bgCanvas = null, bgCtx = null, bgImageData = null, bgN = 0;
+
+// --- GPU-driven body rendering (WebGPU) -------------------------------
+// Bodies used to be built from many separate canvas stroke() calls (one
+// Path2D per width-bucket per individual) -- correct-looking, but real,
+// measurable per-call CPU/rasterizer overhead at population scale. This
+// moves that entirely onto the GPU: every body segment across the WHOLE
+// population, from every individual, is packed into one instance buffer
+// and drawn with instanced draw calls. The vertex shader expands a shared
+// unit quad into a padded bounding box around each capsule; the fragment
+// shader computes the actual distance-to-segment per pixel (a capsule
+// SDF) and colors fill or outline (or discards) from that distance -- the
+// GPU rasterizes the true capsule shape per-instance in parallel, no
+// CPU-side path tessellation at all. This mirrors the reference C++
+// engine's pattern of batching same-pipeline entities into one instanced
+// draw (see Renderers/SceneRenderer's per-pipeline instance batching),
+// adapted to fit this project: one "capsule pipeline", GPU-instanced.
+//
+// TWO separate draw calls per frame, not one: an earlier single-pass
+// version had each instance independently decide fill-vs-outline from its
+// own distance test, which is correct for one capsule in isolation but
+// breaks at a joint between two segments -- GPU instance draw order isn't
+// guaranteed, so one segment's outline ring could rasterize AFTER (on top
+// of) its neighbor's fill, leaving a visible ring right where two parts
+// meet. Splitting into an explicit outline PASS (draw every instance at
+// its outer radius) followed by a fill PASS (draw every instance again,
+// smaller, on top) guarantees fill always wins wherever they overlap,
+// regardless of per-instance order within either pass -- the same
+// ordering guarantee the canvas fallback got for free from doing two
+// sequential stroke() batches.
+//
+// WebGPU adapter/device acquisition is async, unlike WebGL's synchronous
+// context creation -- gpuReady starts false, so the first handful of
+// frames use the canvas fallback automatically until init resolves. If
+// WebGPU isn't available at all, or anything in setup fails, this stays
+// on the canvas fallback further down permanently; nothing here is
+// allowed to leave the page blank.
+const glCanvas = document.getElementById('bodies-gl');
+let gpuDevice = null, gpuContext = null, gpuReady = false;
+let gpuPipeline = null, gpuQuadBuf = null, gpuInstanceBuf = null;
+let gpuUniformBufOutline = null, gpuUniformBufFill = null;
+let gpuBindGroupOutline = null, gpuBindGroupFill = null;
+let gpuInstanceCapacityBytes = 0, gpuInstanceData = null;
+// Per-instance layout (14 floats): start.xy, end.xy, radius, outlineWidth, fillColor.rgba, outlineColor.rgba
+const GPU_FLOATS_PER_INSTANCE = 14;
+const GPU_INSTANCE_STRIDE = GPU_FLOATS_PER_INSTANCE * 4;
+
+async function initWebGPU() {
+  if (!navigator.gpu) throw new Error('WebGPU not supported by this browser');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('no WebGPU adapter available');
+  const device = await adapter.requestDevice();
+  const context = glCanvas.getContext('webgpu');
+  if (!context) throw new Error('failed to get webgpu canvas context');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  // 'premultiplied' is required for a transparent-background canvas to
+  // composite correctly over the layers beneath it -- WebGPU has no
+  // straight-alpha canvas mode, so the shader outputs premultiplied color
+  // (rgb already scaled by alpha) to match.
+  context.configure({ device, format, alphaMode: 'premultiplied' });
+
+  const shaderSrc = `
+    struct Uniforms {
+      resolution: vec2<f32>,
+      passIndex: f32, // 0 = outline, 1 = fill
+      _pad: f32,
+    };
+    @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+    struct VertexOut {
+      @builtin(position) position: vec4<f32>,
+      @location(0) pos: vec2<f32>,
+      @location(1) start: vec2<f32>,
+      @location(2) endp: vec2<f32>,
+      @location(3) radius: f32,
+      @location(4) outlineWidth: f32,
+      @location(5) fillColor: vec4<f32>,
+      @location(6) outlineColor: vec4<f32>,
+    };
+
+    @vertex
+    fn vs_main(
+      @location(0) corner: vec2<f32>,
+      @location(1) start: vec2<f32>,
+      @location(2) endp: vec2<f32>,
+      @location(3) radius: f32,
+      @location(4) outlineWidth: f32,
+      @location(5) fillColor: vec4<f32>,
+      @location(6) outlineColor: vec4<f32>,
+    ) -> VertexOut {
+      var out: VertexOut;
+      let dir = endp - start;
+      let len = length(dir);
+      let axis = select(vec2<f32>(1.0, 0.0), dir / max(len, 0.0001), len > 0.0001);
+      let normal = vec2<f32>(-axis.y, axis.x);
+      let pad = radius + outlineWidth + 2.0;
+      let mid = (start + endp) * 0.5;
+      let local = corner * vec2<f32>(len * 0.5 + pad, pad);
+      let worldPos = mid + axis * local.x + normal * local.y;
+      out.pos = worldPos;
+      out.start = start; out.endp = endp; out.radius = radius; out.outlineWidth = outlineWidth;
+      out.fillColor = fillColor; out.outlineColor = outlineColor;
+      let clip = (worldPos / uniforms.resolution) * 2.0 - 1.0;
+      out.position = vec4<f32>(clip.x, -clip.y, 0.0, 1.0);
+      return out;
+    }
+
+    fn distToSegment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+      let pa = p - a;
+      let ba = b - a;
+      let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+      return length(pa - ba * h);
+    }
+
+    @fragment
+    fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+      let d = distToSegment(in.pos, in.start, in.endp);
+      let isOutlinePass = uniforms.passIndex < 0.5;
+      let useRadius = select(in.radius, in.radius + in.outlineWidth, isOutlinePass);
+      let useColor = select(in.fillColor, in.outlineColor, isOutlinePass);
+      if (d > useRadius + 1.5) {
+        discard;
+      }
+      let edgeAlpha = 1.0 - smoothstep(useRadius - 1.0, useRadius + 1.0, d);
+      var a = useColor.a * edgeAlpha;
+      if (a <= 0.003) {
+        discard;
+      }
+      // premultiplied output
+      return vec4<f32>(useColor.rgb * a, a);
+    }
+  `;
+  // WebGPU validation errors (bad WGSL, bad pipeline descriptor, ...) do
+  // NOT throw from these calls -- they're reported async via the
+  // uncaptured-error/console mechanism while these functions happily
+  // return "invalid" objects. Without this error-scope check, a broken
+  // shader would leave gpuReady = true (nothing here ever threw) with a
+  // pipeline that silently draws nothing every frame -- exactly what
+  // happened when a WGSL reserved-word collision broke the shader.
+  device.pushErrorScope('validation');
+  const shaderModule = device.createShaderModule({ code: shaderSrc });
+
+  const pipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: shaderModule,
+      entryPoint: 'vs_main',
+      buffers: [
+        { // per-vertex quad corner
+          arrayStride: 8,
+          stepMode: 'vertex',
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
+        },
+        { // per-instance capsule data
+          arrayStride: GPU_INSTANCE_STRIDE,
+          stepMode: 'instance',
+          attributes: [
+            { shaderLocation: 1, offset: 0, format: 'float32x2' },  // start
+            { shaderLocation: 2, offset: 8, format: 'float32x2' },  // end
+            { shaderLocation: 3, offset: 16, format: 'float32' },   // radius
+            { shaderLocation: 4, offset: 20, format: 'float32' },   // outlineWidth
+            { shaderLocation: 5, offset: 24, format: 'float32x4' }, // fillColor
+            { shaderLocation: 6, offset: 40, format: 'float32x4' }, // outlineColor
+          ],
+        },
+      ],
+    },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fs_main',
+      targets: [{
+        format,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+  const validationError = await device.popErrorScope();
+  if (validationError) {
+    throw new Error('WebGPU shader/pipeline validation failed: ' + validationError.message);
+  }
+
+  const quadBuf = device.createBuffer({
+    size: 6 * 2 * 4,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true,
+  });
+  new Float32Array(quadBuf.getMappedRange()).set([
+    -1, -1, 1, -1, -1, 1,
+    -1, 1, 1, -1, 1, 1,
+  ]);
+  quadBuf.unmap();
+
+  // Two tiny uniform buffers (resolution + which pass), created once --
+  // the canvas size is fixed, so neither ever needs updating after this.
+  function makeUniformBuf(passValue) {
+    const buf = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true,
+    });
+    new Float32Array(buf.getMappedRange()).set([glCanvas.width, glCanvas.height, passValue, 0]);
+    buf.unmap();
+    return buf;
+  }
+  gpuUniformBufOutline = makeUniformBuf(0);
+  gpuUniformBufFill = makeUniformBuf(1);
+  gpuBindGroupOutline = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: gpuUniformBufOutline } }],
+  });
+  gpuBindGroupFill = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: gpuUniformBufFill } }],
+  });
+
+  gpuDevice = device;
+  gpuContext = context;
+  gpuPipeline = pipeline;
+  gpuQuadBuf = quadBuf;
+  gpuReady = true;
+}
+initWebGPU().catch(e => {
+  console.warn('WebGPU body renderer unavailable, falling back to canvas:', e);
+  gpuReady = false;
+});
+
+// --- fetch loop and render loop are DECOUPLED: the server is polled every
+// ~80ms, but bodies visibly snapping to a new position once per poll reads
+// as random, jittery motion instead of smooth swimming. The render loop
+// instead runs on requestAnimationFrame (display refresh rate) and
+// interpolates each individual's position between the last two known
+// server states, using the ACTUAL measured time between polls (not an
+// assumed constant), so motion is smooth regardless of network/server
+// jitter in the poll cadence itself. ---
+let prevState = null, currState = null;
+let lastPollAt = performance.now();
+let lastPollInterval = 80;
+
+async function fetchLoop() {
+  try {
+    const r = await fetch('/state');
+    const d = await r.json();
+    // The backend can now run slower than the poll rate (e.g. throttled to
+    // real-time via the speed control), in which case most 80ms polls
+    // return the SAME tick unchanged. Rotating prevState/currState and
+    // resetting lastPollAt/lastPollInterval on a duplicate would make the
+    // sim_time extrapolation rate compute as (0 change)/(elapsed) = 0 --
+    // the wave animation freezes solid until the next genuinely new tick
+    // arrives, then jumps forward all at once to catch up. Ignoring
+    // no-op polls entirely keeps lastPollInterval measuring the real
+    // elapsed time between two ACTUALLY different states, so the
+    // extrapolated rate stays meaningful regardless of which side (backend
+    // ticking, or frontend polling) happens to be the faster one.
+    if (currState && d.tick === currState.tick) {
+      setTimeout(fetchLoop, 80);
+      return;
+    }
+    prevState = currState;
+    currState = d;
+    const now = performance.now();
+    lastPollInterval = Math.max(20, now - lastPollAt);
+    lastPollAt = now;
+  } catch (e) {
+    document.getElementById('stats').innerText = 'connection error: ' + e;
+  }
+  setTimeout(fetchLoop, 80);
+}
+
+document.getElementById('reset-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('reset-btn');
+  btn.disabled = true;
+  btn.innerText = 'Resetting...';
+  try {
+    await fetch('/reset', { method: 'POST' });
+    // Discard interpolation state across the discontinuity -- otherwise the
+    // next poll's fresh founders would be lerped from the old, now-gone
+    // population's last positions (the same kind of spurious "ray" the
+    // capture-teleport fix above exists for).
+    prevState = null;
+    currState = null;
+    trails.clear();
+  } finally {
+    btn.disabled = false;
+    btn.innerText = 'Reset simulation';
+  }
+});
+
+// Click-to-feed: drop a real, lasting clump of food at the clicked world
+// position (see rust_world's add_food_at) -- individuals find and eat it
+// through the exact same sensing/eating path as any other food, nothing
+// scripted about how they react to it. A short-lived expanding ring marks
+// the drop point so the click itself feels like it did something, even
+// before anything swims over to it.
+const foodDropMarkers = []; // {x, y, t} in canvas pixel coords + performance.now()
+canvas.style.cursor = 'crosshair';
+canvas.addEventListener('click', async (e) => {
+  if (!currState) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = (e.clientX - rect.left) / rect.width * canvas.width;
+  const py = (e.clientY - rect.top) / rect.height * canvas.height;
+  const N = currState.world_size;
+  const cell = canvas.width / N;
+  const wx = px / cell;
+  const wy = N - py / cell; // world Y=0 is the bottom; canvas Y=0 is the top
+  foodDropMarkers.push({ x: px, y: py, t: performance.now() });
+  try {
+    await fetch('/drop_food', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: wx, y: wy }),
+    });
+  } catch (err) {
+    console.warn('drop food failed:', err);
+  }
+});
+
+document.getElementById('speed-select').addEventListener('change', async (e) => {
+  const v = e.target.value;
+  const multiplier = v === '' ? null : parseInt(v, 10);
+  try {
+    await fetch('/speed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ multiplier }),
+    });
+  } catch (err) {
+    console.warn('failed to set speed:', err);
+  }
+});
+
+function ensureBgBuffer(N) {
+  if (bgN === N) return;
+  bgN = N;
+  bgCanvas = document.createElement('canvas');
+  bgCanvas.width = N; bgCanvas.height = N;
+  bgCtx = bgCanvas.getContext('2d');
+  bgImageData = bgCtx.createImageData(N, N);
+}
+
+let blobCanvas = null, blobCtx = null;
+function ensureBlobBuffer(w, h) {
+  if (blobCanvas && blobCanvas.width === w && blobCanvas.height === h) return;
+  blobCanvas = document.createElement('canvas');
+  blobCanvas.width = w; blobCanvas.height = h;
+  blobCtx = blobCanvas.getContext('2d');
+}
+
+const OUTLINE_SCALE = 1.35, FILL_SCALE = 1.0;
+
+// GPU path: pack every segment (plus one self-capsule per root) of every
+// individual into one big instance buffer, upload once, draw once. See the
+// initGL() comment above for why this replaces per-individual/per-segment
+// canvas calls.
+function drawBodiesGPU(bodies) {
+  let count = 0;
+  for (const b of bodies) count += Math.max(1, b.pts.length - 1) + 1; // segments (or 1 if none) + the root's own cap
+  const floatsNeeded = count * GPU_FLOATS_PER_INSTANCE;
+  if (!gpuInstanceData || gpuInstanceData.length < floatsNeeded) {
+    const newCapacityFloats = Math.max(floatsNeeded, (gpuInstanceData ? gpuInstanceData.length : 0) * 2, 1024);
+    gpuInstanceData = new Float32Array(newCapacityFloats);
+    const newBytes = newCapacityFloats * 4;
+    if (gpuInstanceBuf) gpuInstanceBuf.destroy();
+    gpuInstanceBuf = gpuDevice.createBuffer({
+      size: newBytes,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    gpuInstanceCapacityBytes = newBytes;
+  }
+  const buf = gpuInstanceData;
+  let o = 0;
+  for (const b of bodies) {
+    let wr = 0, wg = 0, wb = 0;
+    for (const [r, g, bl] of b.colors) { wr += r; wg += g; wb += bl; }
+    const n = b.colors.length || 1;
+    wr = (wr / n) / 255; wg = (wg / n) / 255; wb = (wb / n) / 255;
+    const fillA = 0.85 * b.healthAlpha, outlineA = 0.95 * b.healthAlpha;
+    const oc0 = 225 / 255, oc1 = 232 / 255, oc2 = 240 / 255;
+    for (let i = 0; i < b.pts.length; i++) {
+      const parent = b.ind.parents[i];
+      if (parent < 0) continue;
+      const fillRad = (b.rads[i] + b.rads[parent]) * 0.5 * FILL_SCALE;
+      const outlineWidth = (b.rads[i] + b.rads[parent]) * 0.5 * (OUTLINE_SCALE - FILL_SCALE);
+      buf[o+0] = b.pts[parent][0]; buf[o+1] = b.pts[parent][1];
+      buf[o+2] = b.pts[i][0]; buf[o+3] = b.pts[i][1];
+      buf[o+4] = fillRad; buf[o+5] = outlineWidth;
+      buf[o+6] = wr; buf[o+7] = wg; buf[o+8] = wb; buf[o+9] = fillA;
+      buf[o+10] = oc0; buf[o+11] = oc1; buf[o+12] = oc2; buf[o+13] = outlineA;
+      o += GPU_FLOATS_PER_INSTANCE;
+    }
+    // Root's own cap: a degenerate (start==end) capsule, which the shader's
+    // distance-to-segment reduces to a plain circle -- covers the lone-
+    // founder case (no segments at all) and reinforces the head's own cap
+    // when it does have children.
+    const rootRad = b.rads[0] * FILL_SCALE;
+    const rootOutline = b.rads[0] * (OUTLINE_SCALE - FILL_SCALE);
+    buf[o+0] = b.pts[0][0]; buf[o+1] = b.pts[0][1];
+    buf[o+2] = b.pts[0][0]; buf[o+3] = b.pts[0][1];
+    buf[o+4] = rootRad; buf[o+5] = rootOutline;
+    buf[o+6] = wr; buf[o+7] = wg; buf[o+8] = wb; buf[o+9] = fillA;
+    buf[o+10] = oc0; buf[o+11] = oc1; buf[o+12] = oc2; buf[o+13] = outlineA;
+    o += GPU_FLOATS_PER_INSTANCE;
+  }
+  const instanceCount = o / GPU_FLOATS_PER_INSTANCE;
+
+  const encoder = gpuDevice.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{
+      view: gpuContext.getCurrentTexture().createView(),
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      loadOp: 'clear',
+      storeOp: 'store',
+    }],
+  });
+  if (instanceCount > 0) {
+    gpuDevice.queue.writeBuffer(gpuInstanceBuf, 0, buf.buffer, 0, o * 4);
+    pass.setPipeline(gpuPipeline);
+    pass.setVertexBuffer(0, gpuQuadBuf);
+    pass.setVertexBuffer(1, gpuInstanceBuf);
+    // Outline pass, then fill pass, on top -- see the big comment above
+    // initWebGPU for why this must be two separate draws, not one
+    // per-fragment branch.
+    pass.setBindGroup(0, gpuBindGroupOutline);
+    pass.draw(6, instanceCount);
+    pass.setBindGroup(0, gpuBindGroupFill);
+    pass.draw(6, instanceCount);
+  }
+  pass.end();
+  gpuDevice.queue.submit([encoder.finish()]);
+}
+
+// Canvas fallback (only used if WebGL2/shaders failed to initialize): the
+// same capsule-chain construction, done with native thick-stroked paths
+// with round caps instead of a GPU shader. Slower at scale, but correct,
+// and guarantees the page never just shows nothing.
+function drawBodiesCanvasFallback(bodies) {
+  ensureBlobBuffer(canvas.width, canvas.height);
+  blobCtx.clearRect(0, 0, canvas.width, canvas.height);
+  blobCtx.lineCap = 'round';
+  for (const b of bodies) {
+    const buckets = new Map();
+    for (let i = 0; i < b.pts.length; i++) {
+      const parent = b.ind.parents[i];
+      if (parent < 0) continue;
+      const segRad = (b.rads[i] + b.rads[parent]) * 0.5;
+      const key = Math.round(segRad * 2) / 2;
+      let path = buckets.get(key);
+      if (!path) { path = new Path2D(); buckets.set(key, path); }
+      path.moveTo(b.pts[parent][0], b.pts[parent][1]);
+      path.lineTo(b.pts[i][0], b.pts[i][1]);
+    }
+    let wr = 0, wg = 0, wb = 0;
+    for (const [r, g, bl] of b.colors) { wr += r; wg += g; wb += bl; }
+    const n = b.colors.length || 1;
+    wr = Math.round(wr / n); wg = Math.round(wg / n); wb = Math.round(wb / n);
+    const outlineStyle = `rgba(225,232,240,${(0.95 * b.healthAlpha).toFixed(2)})`;
+    const fillStyle = `rgba(${wr},${wg},${wb},${(0.85 * b.healthAlpha).toFixed(2)})`;
+
+    for (const [width, path] of buckets) {
+      blobCtx.strokeStyle = outlineStyle;
+      blobCtx.lineWidth = width * 2 * OUTLINE_SCALE;
+      blobCtx.stroke(path);
+    }
+    blobCtx.fillStyle = outlineStyle;
+    blobCtx.beginPath();
+    blobCtx.arc(b.pts[0][0], b.pts[0][1], b.rads[0] * OUTLINE_SCALE, 0, 2 * Math.PI);
+    blobCtx.fill();
+
+    for (const [width, path] of buckets) {
+      blobCtx.strokeStyle = fillStyle;
+      blobCtx.lineWidth = width * 2 * FILL_SCALE;
+      blobCtx.stroke(path);
+    }
+    blobCtx.fillStyle = fillStyle;
+    blobCtx.beginPath();
+    blobCtx.arc(b.pts[0][0], b.pts[0][1], b.rads[0] * FILL_SCALE, 0, 2 * Math.PI);
+    blobCtx.fill();
+  }
+  ctx.drawImage(blobCanvas, 0, 0);
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function lerpAngle(a, b, t) {
+  let diff = ((b - a + Math.PI) % (2 * Math.PI)) - Math.PI;
+  if (diff < -Math.PI) diff += 2 * Math.PI;
+  return a + diff * t;
+}
+
+// A capture (attachment) TELEPORTS the target instantly to the attacker's
+// position -- that's a real, intentional discontinuity, not motion. Smoothly
+// interpolating across it drew what looked like a long "ray" pulling one
+// individual toward another from across the map. Any jump bigger than a body
+// could plausibly swim between two polls is treated as a teleport and snapped
+// straight to the new position instead of being lerped.
+const TELEPORT_DISTANCE = 15;
+
+// Exact client-side reconstruction of the engine's own forward-kinematics
+// formula (see rust_world's world_positions_at) -- given a root position,
+// heading, and a point in CONTINUOUS simulated time, this computes every
+// joint's true position, including the bend-wave animation, instead of
+// linearly interpolating raw joint coordinates sampled only once per poll.
+// That distinction matters a lot now that many simulation ticks can run
+// between two polls (see sim_worker.py's decoupled tick/publish loop): the
+// wave is a periodic function of sim_time, and lerping two samples of a
+// periodic signal that moved through multiple cycles between them just
+// looks wrong (aliasing), no matter how the interpolation itself is done.
+// Reconstructing the exact formula at the real elapsed time has no such
+// limit -- it's correct at any sim_time, sampled as often as the display
+// wants (every animation frame), regardless of how fast the backend is
+// actually ticking underneath.
+function fkPositions(ind, simTime, rootPos, heading) {
+  const n = ind.positions.length;
+  const flex = ind.flex || ind.positions.map(() => 1.0);
+  const restAngle = ind.rest_angle || ind.positions.map(() => 0.0);
+  const partSize = ind.part_size || ind.positions.map(() => 1.0);
+  const sizeScale = ind.size_scale || 1.0;
+  const amp = ind.bend_amplitude || 0;
+  const freq = ind.bend_frequency || 0;
+  const phase = ind.bend_phase || 0;
+  const angles = new Array(n);
+  const positions = new Array(n);
+  for (let k = 0; k < n; k++) {
+    const wave = flex[k] * amp * Math.sin(2 * Math.PI * freq * simTime + phase + k * 0.7);
+    const parent = ind.parents[k];
+    const segLen = sizeScale * (partSize[k] !== undefined ? partSize[k] : 1.0);
+    if (parent < 0) {
+      angles[k] = heading + wave;
+      positions[k] = rootPos;
+    } else {
+      angles[k] = angles[parent] + restAngle[k] + wave;
+      positions[k] = [positions[parent][0] + segLen * Math.cos(angles[k]), positions[parent][1] + segLen * Math.sin(angles[k])];
+    }
+  }
+  return positions;
+}
+
+function interpolatedIndividuals(prev, curr, alpha, simTimeNow) {
+  const prevById = prev ? new Map(prev.individuals.map(i => [i.id, i])) : null;
+  return curr.individuals.map(ind => {
+    let rootPos = ind.positions[0];
+    let heading = ind.heading !== undefined ? ind.heading : 0;
+    const p = prevById ? prevById.get(ind.id) : null;
+    if (p) {
+      const dx = ind.positions[0][0] - p.positions[0][0];
+      const dy = ind.positions[0][1] - p.positions[0][1];
+      if (dx * dx + dy * dy <= TELEPORT_DISTANCE * TELEPORT_DISTANCE) {
+        rootPos = [lerp(p.positions[0][0], ind.positions[0][0], alpha), lerp(p.positions[0][1], ind.positions[0][1], alpha)];
+        if (p.heading !== undefined && ind.heading !== undefined) {
+          heading = lerpAngle(p.heading, ind.heading, alpha);
+        }
+      }
+      // else: a real teleport (captured/released) -- keep curr's own root/heading as-is, don't lerp across it
+    }
+    if (!ind.rest_angle) return { ...ind, positions: [rootPos, ...ind.positions.slice(1)] }; // safety fallback if an older cached state lacks the new fields
+    const positions = fkPositions(ind, simTimeNow, rootPos, heading);
+    return { ...ind, positions };
+  });
+}
+
+let lastBgState = null;
+let lastBgToggleKey = '';
+
+function render() {
+  requestAnimationFrame(render);
+  if (!currState) return;
+  const d = currState;
+  const alpha = Math.min(1, (performance.now() - lastPollAt) / lastPollInterval);
+  // Extrapolate the CONTINUOUS simulated clock forward from the last two
+  // known samples, using the actually-observed sim-seconds-per-real-ms rate
+  // (the backend can tick much faster than it publishes -- see
+  // sim_worker.py -- so this is not 1:1 with wall-clock time). Falls back
+  // to the last known sim_time verbatim if there's no second sample yet or
+  // the field is missing (older cached state).
+  let simTimeNow = d.sim_time || 0;
+  if (prevState && typeof prevState.sim_time === 'number' && typeof d.sim_time === 'number' && lastPollInterval > 0) {
+    const simRatePerMs = (d.sim_time - prevState.sim_time) / lastPollInterval;
+    simTimeNow = d.sim_time + (performance.now() - lastPollAt) * simRatePerMs;
+  }
+  const individuals = interpolatedIndividuals(prevState, currState, alpha, simTimeNow);
+
+  const N = d.world_size;
+  const cell = canvas.width / N;
+  const showPheromone = document.getElementById('show-pheromone').checked;
+  const showBlood = document.getElementById('show-blood').checked;
+  const showAcid = document.getElementById('show-acid').checked;
+  const showLight = document.getElementById('show-light').checked;
+  const showQuorum = document.getElementById('show-quorum').checked;
+  const showTrails = document.getElementById('show-trails').checked;
+  const showCorpses = document.getElementById('show-corpses').checked;
+
+  // Composite background (food + pheromone haze + blood stain + acid tint +
+  // light glow) written into an off-screen ImageData buffer at WORLD
+  // resolution, then scaled up with one drawImage call. This 25,600-cell
+  // (at 160x160) loop was being redone on EVERY animation frame -- up to
+  // ~144/sec -- even though the underlying field data only changes once per
+  // ~80ms poll (~12.5/sec). That mismatch alone was measured as the
+  // dominant cost of a 192ms render() call (an ~9fps actual frame rate).
+  // It's now only rebuilt when a new poll actually arrived or a toggle
+  // changed; drawImage (a cheap GPU blit) still runs every frame.
+  ensureBgBuffer(N);
+  const toggleKey = `${showPheromone}${showBlood}${showAcid}${showLight}${showQuorum}`;
+  if (d !== lastBgState || toggleKey !== lastBgToggleKey) {
+    lastBgState = d;
+    lastBgToggleKey = toggleKey;
+    const buf = bgImageData.data;
+    const terrain = d.terrain;
+    const quorumField = d.quorum;
+    for (let x = 0; x < N; x++) {
+      const food_x = d.food[x], pher_x = d.pheromone[x], blood_x = d.blood[x];
+      const acid_x = d.acid[x], light_x = d.light[x];
+      const quorum_x = quorumField ? quorumField[x] : null;
+      const terrain_x = terrain ? terrain[x] : null;
+      for (let y = 0; y < N; y++) {
+        const row = N - 1 - y;  // world Y=0 is the bottom; image row 0 is the top
+        const idx = (row * N + x) * 4;
+        const t = terrain_x ? terrain_x[y] : 0;
+        if (t === 1) {  // rock: a solid, visibly hard obstacle
+          buf[idx] = 58; buf[idx + 1] = 60; buf[idx + 2] = 68; buf[idx + 3] = 255;
+          continue;
+        }
+        const f = food_x[y];
+        const ph = showPheromone ? pher_x[y] : 0;
+        const bl = showBlood ? blood_x[y] : 0;
+        const ac = showAcid ? acid_x[y] : 0;
+        const li = showLight ? light_x[y] : 0;
+        // Quorum sensing's density signal renders as a faint violet haze --
+        // a distinct hue from pheromone (green), blood (red), acid
+        // (cyan-ish), and light (yellow) so a genuinely crowded pocket of
+        // the world is visually readable at a glance, not just inferable
+        // from population counts.
+        const qu = (showQuorum && quorum_x) ? quorum_x[y] : 0;
+        if (t === 2) {  // sand: the seafloor -- diggable, visibly a different medium than open water
+          buf[idx] = 120 + f * 15 + bl * 100 + ac * 30 + qu * 60;
+          buf[idx + 1] = 100 + f * 25 + ph * 20 + ac * 60 + li * 80;
+          buf[idx + 2] = 70 + f * 10 + li * 40 + qu * 90;
+          buf[idx + 3] = 255;
+          continue;
+        }
+        buf[idx] = 10 + f * 20 + bl * 180 + ac * 40 + qu * 70;
+        buf[idx + 1] = 15 + f * 60 + ph * 40 + ac * 160 + li * 150;
+        buf[idx + 2] = 20 + f * 20 + ph * 120 + li * 60 + qu * 100;
+        buf[idx + 3] = 255;
+      }
+    }
+    bgCtx.putImageData(bgImageData, 0, 0);
+  }
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(bgCanvas, 0, 0, canvas.width, canvas.height);
+
+  // fading wake trails behind each root, reinforcing the swimming feel
+  const seenIds = new Set();
+  for (const ind of individuals) {
+    seenIds.add(ind.id);
+    const root = ind.positions[0];
+    let hist = trails.get(ind.id);
+    if (!hist) { hist = []; trails.set(ind.id, hist); }
+    // A capture teleport is a real, instant jump -- if the trail's last
+    // point is far from the new one, this is that jump, not motion, so the
+    // trail should restart here instead of drawing one long line across
+    // wherever the body used to be (this was the "long-range ray" artifact).
+    if (hist.length > 0) {
+      const last = hist[hist.length - 1];
+      const dx = root[0] - last[0], dy = root[1] - last[1];
+      if (dx * dx + dy * dy > TELEPORT_DISTANCE * TELEPORT_DISTANCE) hist.length = 0;
+    }
+    hist.push(root);
+    if (hist.length > 10) hist.shift();
+  }
+  for (const id of trails.keys()) if (!seenIds.has(id)) trails.delete(id);
+
+  if (showTrails) {
+    for (const ind of individuals) {
+      const hist = trails.get(ind.id);
+      if (!hist || hist.length < 2) continue;
+      const [cr, cg, cb] = ind.color;
+      for (let i = 1; i < hist.length; i++) {
+        const a = (i / hist.length) * 0.25;
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${a.toFixed(2)})`;
+        ctx.lineWidth = Math.max(1, cell * 0.25);
+        ctx.beginPath();
+        ctx.moveTo(hist[i - 1][0] * cell, canvas.height - hist[i - 1][1] * cell);
+        ctx.lineTo(hist[i][0] * cell, canvas.height - hist[i][1] * cell);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Corpses: static remains on the floor, never removed on a timer (only
+  // once fully eaten) -- rendered desaturated/dim so they read as dead,
+  // shrinking slightly as their energy is consumed.
+  if (showCorpses) {
+    for (const c of (d.corpses || [])) {
+      const [cr, cg, cb] = c.color;
+      const fade = Math.max(0.15, Math.min(0.55, c.energy / 15));
+      for (const [px, py] of c.positions) {
+        const sx = px * cell, sy = canvas.height - py * cell;
+        ctx.fillStyle = `rgba(${cr * 0.5 | 0},${cg * 0.5 | 0},${cb * 0.5 | 0},${fade.toFixed(2)})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, Math.max(1, cell * 0.4), 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Bodies: a skeleton line per joint (parent->child) drawn first, then a
+  // tapered pixel marker on top (root slightly larger, with a small pale
+  // highlight so head/tail orientation reads at a glance). Pixels with low
+  // "flex" (evolved rigidity) render slightly larger/squarer to read as
+  // stiff/static parts, vs. flexible tips which stay round. Crawling
+  // individuals (on the floor, using leg-thrust instead of swimming) get a
+  // small ground marker under their root.
+  const pixelSize = Math.max(2, cell * 0.9);
+  let totalSize = 0, maxSize = 0;
+
+  // Precompute shared per-pixel render data once (positions, radius, wound
+  // color) so both the soft-body blob pass and the detail pass below can
+  // use it without redoing the same math twice.
+  const bodies = individuals.map(ind => {
+    const [cr, cg, cb] = ind.color;
+    const healthAlpha = Math.max(0.35, Math.min(1, ind.energy / 12));
+    const pts = ind.positions.map(([px, py]) => [px * cell, canvas.height - py * cell]);
+    const flex = ind.flex || pts.map(() => 1.0);
+    const storage = ind.storage || pts.map(() => 0.0);
+    const partSize = ind.part_size || pts.map(() => 1.0);
+    const healthFrac = ind.health_frac || pts.map(() => 1.0);
+    const sizeScale = ind.size_scale || 1.0;
+    // Volume-preserving cue: a body curled up tighter than its own resting
+    // reach reads as "compressed" -- puff the blob radius up a little, and
+    // slim it back down when stretched out, the same trick real soft
+    // tissue reads as when you flex vs extend a limb. Approximated cheaply
+    // from the ratio of the actual path length between consecutive joints
+    // to the straight-line spread of the whole body, no physics involved.
+    let pathLen = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const p = ind.parents[i];
+      if (p < 0) continue;
+      pathLen += Math.hypot(pts[i][0] - pts[p][0], pts[i][1] - pts[p][1]);
+    }
+    let spread = 0;
+    for (let i = 1; i < pts.length; i++) spread = Math.max(spread, Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]));
+    const compression = pathLen > 0 ? (1 - Math.min(1, spread / pathLen)) : 0;
+    const puff = 1 + compression * 0.35;
+
+    const rads = [], colors = [];
+    for (let i = 0; i < pts.length; i++) {
+      const isRoot = i === 0;
+      const rigidity = 1 - (flex[i] !== undefined ? flex[i] : 1.0);
+      const partScale = partSize[i] !== undefined ? partSize[i] : 1.0;
+      const rad = (isRoot ? pixelSize * 0.65 : pixelSize * (0.38 + rigidity * 0.14)) * sizeScale * partScale * puff;
+      const wound = 1 - (healthFrac[i] !== undefined ? healthFrac[i] : 1.0);
+      // A wounded part (health.rs's per-pixel hit-point pool, drained by
+      // combat instead of the part just vanishing outright) darkens and
+      // reddens toward its own base color as it takes damage, so a fight
+      // that didn't kill outright is still visibly consequential.
+      const wr = Math.round(cr + (200 - cr) * wound * 0.6);
+      const wg = Math.round(cg * (1 - wound * 0.6));
+      const wb = Math.round(cb * (1 - wound * 0.6));
+      rads.push(rad);
+      colors.push([wr, wg, wb]);
+    }
+    // The root already renders bigger than a typical part by design (it's
+    // "the head"), but an evolved root with a large `size` trait (or a
+    // heavily size_scale-inflated body) could make it SO much bigger than
+    // everything else that its own envelope fully swallows nearby limbs --
+    // no ring/bump for them ever pokes out past it, so the body just reads
+    // as one big blob with no visible structure. This is a rendering-only
+    // cap (nothing about the evolved trait itself changes) so the head can
+    // still be visibly the biggest part without hiding the rest of the body.
+    if (rads.length > 1) {
+      const otherMax = Math.max(...rads.slice(1));
+      rads[0] = Math.min(rads[0], otherMax * 1.6);
+    }
+    return { ind, cr, cg, cb, healthAlpha, pts, flex, storage, partSize, healthFrac, sizeScale, rads, colors, rigidities: pts.map((_, i) => 1 - (flex[i] !== undefined ? flex[i] : 1.0)) };
+  });
+
+  // Soft-body "skin": see drawBodiesGPU (WebGPU, preferred) and
+  // drawBodiesCanvasFallback (used only if WebGPU isn't available) below.
+  if (gpuReady) {
+    drawBodiesGPU(bodies);
+  } else {
+    drawBodiesCanvasFallback(bodies);
+  }
+
+  octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  const FOOD_MARKER_LIFETIME = 900; // ms
+  for (let i = foodDropMarkers.length - 1; i >= 0; i--) {
+    const m = foodDropMarkers[i];
+    const age = performance.now() - m.t;
+    if (age > FOOD_MARKER_LIFETIME) { foodDropMarkers.splice(i, 1); continue; }
+    const t = age / FOOD_MARKER_LIFETIME;
+    octx.strokeStyle = `rgba(255,220,120,${(1 - t).toFixed(2)})`;
+    octx.lineWidth = 2;
+    octx.beginPath();
+    octx.arc(m.x, m.y, 4 + t * 22, 0, 2 * Math.PI);
+    octx.stroke();
+  }
+
+  for (const b of bodies) {
+    const { ind, healthAlpha, pts, storage, sizeScale } = b;
+    if (pinnedColor && ind.color[0] === pinnedColor[0] && ind.color[1] === pinnedColor[1] && ind.color[2] === pinnedColor[2]) {
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 220);
+      octx.strokeStyle = `rgba(255,255,140,${(0.5 + 0.5 * pulse).toFixed(2)})`;
+      octx.lineWidth = 2;
+      octx.beginPath();
+      octx.arc(pts[0][0], pts[0][1], (b.rads[0] + 6 + pulse * 4), 0, 2 * Math.PI);
+      octx.stroke();
+    }
+    for (let i = 0; i < pts.length; i++) {
+      const rad = b.rads[i];
+      // an evolved high-storage pixel (an emerging "belly"/"mouth" anchor,
+      // wherever the body happens to grow one -- see storage_anchor_position
+      // in the engine) gets a soft amber glow so it's actually visible
+      if ((storage[i] || 0) > 0.5) {
+        octx.fillStyle = `rgba(255,200,80,${(0.35 * (storage[i] - 0.5) / 0.5 * healthAlpha).toFixed(2)})`;
+        octx.beginPath();
+        octx.arc(pts[i][0], pts[i][1], rad * 1.8, 0, 2 * Math.PI);
+        octx.fill();
+      }
+    }
+    // root highlight -- a small pale dot marking the "head", ringed by a
+    // thin sex marker (pink=female, blue=male)
+    octx.fillStyle = `rgba(255,255,255,${(healthAlpha * 0.8).toFixed(2)})`;
+    octx.beginPath();
+    octx.arc(pts[0][0], pts[0][1], Math.max(1, pixelSize * 0.18 * sizeScale), 0, 2 * Math.PI);
+    octx.fill();
+    octx.strokeStyle = ind.female ? `rgba(255,120,190,${healthAlpha.toFixed(2)})` : `rgba(120,180,255,${healthAlpha.toFixed(2)})`;
+    octx.lineWidth = 1;
+    octx.beginPath();
+    octx.arc(pts[0][0], pts[0][1], Math.max(1.5, pixelSize * 0.3 * sizeScale), 0, 2 * Math.PI);
+    octx.stroke();
+
+    if (ind.crawling) {
+      octx.strokeStyle = `rgba(255,220,140,0.6)`;
+      octx.lineWidth = 1;
+      octx.beginPath();
+      octx.ellipse(pts[0][0], pts[0][1] + pixelSize * 0.6, pixelSize * 0.8, pixelSize * 0.25, 0, 0, 2 * Math.PI);
+      octx.stroke();
+    }
+
+    totalSize += ind.size;
+    maxSize = Math.max(maxSize, ind.size);
+  }
+
+  const avgSize = d.population ? (totalSize / d.population).toFixed(2) : 0;
+  document.getElementById('stats').innerText =
+    `tick ${d.tick} — population ${d.population} — avg size ${avgSize} — max size ${maxSize} — ` +
+    `reproductions ${d.events.reproductions||0} — fights ${d.events.fights||0} — ` +
+    `scavenged ${d.events.scavenged||0} — deaths ${d.events.deaths||0} — corpses ${(d.corpses||[]).length}`;
+
+  const banner = document.getElementById('weather-banner');
+  banner.innerText = d.weather ? `⚠ weather: ${d.weather.replace('_', ' ')}` : '';
+
+  // live species inventory: one row per distinct lineage (procedurally
+  // named from its current average traits + inherited color -- see
+  // sim_worker.py's generate_lineage_name)
+  const tbody = document.getElementById('species-body');
+  tbody.innerHTML = '';
+  for (const s of (d.species || [])) {
+    const tr = document.createElement('tr');
+    const [r, g, b] = s.color;
+    tr.innerHTML =
+      `<td><span class="swatch" style="background:rgb(${r},${g},${b})"></span>${s.name || ''}</td>` +
+      `<td>${s.count}</td><td>${s.avg_size}</td><td>${s.avg_energy}</td>` +
+      `<td>${s.avg_bend_amplitude}</td><td>${s.avg_bite_force}</td><td>${s.avg_toughness}</td>` +
+      `<td>${s.avg_stickiness}</td><td>${s.avg_crawl_affinity ?? ''}</td>` +
+      `<td>${s.avg_acid_secretion ?? ''}</td><td>${s.avg_light_emission ?? ''}</td>` +
+      `<td>${s.avg_disease_resistance ?? ''}</td>`;
+    // Click a lineage to track it: a pulsing highlight ring on every one of
+    // its individuals on the canvas, so you can actually follow one
+    // lineage's story (where it lives, how it's doing) instead of it being
+    // just a row of numbers. Click again (or click elsewhere) to unpin.
+    tr.style.cursor = 'pointer';
+    if (pinnedColor && pinnedColor[0] === r && pinnedColor[1] === g && pinnedColor[2] === b) {
+      tr.style.background = '#1c3a2e';
+    }
+    tr.addEventListener('click', () => {
+      pinnedColor = (pinnedColor && pinnedColor[0] === r && pinnedColor[1] === g && pinnedColor[2] === b)
+        ? null : [r, g, b];
+    });
+    tbody.appendChild(tr);
+  }
+
+  // world chronicle: narrated milestones (records, extinctions, weather,
+  // population growth) computed server-side -- only re-render on change
+  const chron = d.chronicle || [];
+  if (chron.length !== lastChronicleLen) {
+    lastChronicleLen = chron.length;
+    const box = document.getElementById('chronicle');
+    box.innerHTML = chron.map(line => {
+      const m = line.match(/^\[t(\d+)\]\s*(.*)$/);
+      return m ? `<div><span class="tick">t${m[1]}</span>${m[2]}</div>` : `<div>${line}</div>`;
+    }).join('') || 'quiet so far...';
+  }
+
+  // population + lineage-count sparkline: the ecosystem's story over time,
+  // not just its current frame
+  const hist = d.history || [];
+  if (hist.length > 1) {
+    const W = histCanvas.width, H = histCanvas.height;
+    histCtx.clearRect(0, 0, W, H);
+    const maxPop = Math.max(1, ...hist.map(h => h.population));
+    const maxLin = Math.max(1, ...hist.map(h => h.lineages));
+    const step = W / (hist.length - 1);
+
+    histCtx.strokeStyle = '#5fd0ff';
+    histCtx.lineWidth = 1.5;
+    histCtx.beginPath();
+    hist.forEach((h, i) => {
+      const x = i * step, y = H - (h.population / maxPop) * (H - 4) - 2;
+      i === 0 ? histCtx.moveTo(x, y) : histCtx.lineTo(x, y);
+    });
+    histCtx.stroke();
+
+    histCtx.strokeStyle = '#ffb15f';
+    histCtx.lineWidth = 1.5;
+    histCtx.beginPath();
+    hist.forEach((h, i) => {
+      const x = i * step, y = H - (h.lineages / maxLin) * (H - 4) - 2;
+      i === 0 ? histCtx.moveTo(x, y) : histCtx.lineTo(x, y);
+    });
+    histCtx.stroke();
+
+    histCtx.font = '10px system-ui';
+    histCtx.fillStyle = '#5fd0ff'; histCtx.fillText(`population (max ${maxPop})`, 4, 12);
+    histCtx.fillStyle = '#ffb15f'; histCtx.fillText(`lineages (max ${maxLin})`, 4, 24);
+  }
+}
+
+fetchLoop();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

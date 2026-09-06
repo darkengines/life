@@ -1,0 +1,19 @@
+# Rust build output
+/engine/target/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime state: the live world snapshot, IPC files, and the experience-replay
+# log the engine writes continuously. All regenerated on run; none belongs in
+# version control (the state file alone is ~15MB and rewritten many times a
+# second, and the experience log rotates through hundreds of MB).
+/var/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
