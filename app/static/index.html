@@ -407,11 +407,28 @@ initWebGPU().catch(e => {
 let prevState = null, currState = null;
 let lastPollAt = performance.now();
 let lastPollInterval = 80;
+let staticState = null;
+let fieldState = null;
+
+async function hydrateState(d) {
+  if (!staticState || staticState.static_version !== d.static_version) {
+    staticState = await (await fetch('/static_state')).json();
+  }
+  if (!fieldState || fieldState.field_version !== d.field_version) {
+    fieldState = await (await fetch('/fields')).json();
+  }
+  return { ...staticState, ...fieldState, ...d };
+}
 
 async function fetchLoop() {
+  if (document.hidden) {
+    setTimeout(fetchLoop, 1000);
+    return;
+  }
   try {
     const r = await fetch('/state');
-    const d = await r.json();
+    let d = await r.json();
+    d = await hydrateState(d);
     // The backend can now run slower than the poll rate (e.g. throttled to
     // real-time via the speed control), in which case most 80ms polls
     // return the SAME tick unchanged. Rotating prevState/currState and
@@ -437,6 +454,10 @@ async function fetchLoop() {
   }
   setTimeout(fetchLoop, 80);
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) fetchLoop();
+});
 
 document.getElementById('reset-btn').addEventListener('click', async () => {
   const btn = document.getElementById('reset-btn');

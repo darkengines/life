@@ -17,33 +17,48 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # All mutable runtime state lives in var/ (gitignored), never beside the source.
 VAR = ROOT / "var"
 STATE_PATH = VAR / "_live_state.json"
+STATIC_STATE_PATH = VAR / "_static_state.json"
+FIELD_STATE_PATH = VAR / "_field_state.json"
 RESET_PATH = VAR / "_reset_request"
 SPEED_PATH = VAR / "_speed_control.json"
 FOOD_DROP_PATH = VAR / "_food_drops.json"
 
 _EMPTY_STATE = (b'{"tick":0,"events":{},"food":[],"pheromone":[],"blood":[],'
                 b'"individuals":[],"species":[],"chronicle":[],"world_size":48,"population":0}')
+_EMPTY_STATIC_STATE = b'{"static_version":0,"world_size":48,"terrain":[]}'
+_EMPTY_FIELD_STATE = (b'{"field_version":0,"food":[],"pheromone":[],"blood":[],'
+                      b'"acid":[],"light":[],"quorum":[]}')
 
 app = FastAPI()
 
 
-@app.get("/state")
-def get_state():
+def _read_runtime_bytes(path: Path, fallback: bytes) -> bytes:
     # sim_worker.py replaces this file atomically every tick, but Windows can
     # still occasionally deny an open() that lands in the same instant as a
     # replace (measured: ~2% of reads under continuous polling) -- a few
     # retries a couple ms apart is far cheaper than the client ever seeing a
     # failed poll for something this transient.
-    data = None
     for attempt in range(5):
         try:
-            data = STATE_PATH.read_bytes()
-            break
+            return path.read_bytes()
         except (FileNotFoundError, PermissionError, OSError):
             time.sleep(0.002)
-    if data is None:
-        data = _EMPTY_STATE
-    return Response(content=data, media_type="application/json")
+    return fallback
+
+
+@app.get("/state")
+def get_state():
+    return Response(content=_read_runtime_bytes(STATE_PATH, _EMPTY_STATE), media_type="application/json")
+
+
+@app.get("/static_state")
+def get_static_state():
+    return Response(content=_read_runtime_bytes(STATIC_STATE_PATH, _EMPTY_STATIC_STATE), media_type="application/json")
+
+
+@app.get("/fields")
+def get_fields():
+    return Response(content=_read_runtime_bytes(FIELD_STATE_PATH, _EMPTY_FIELD_STATE), media_type="application/json")
 
 
 @app.post("/reset")

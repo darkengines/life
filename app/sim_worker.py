@@ -69,6 +69,10 @@ EXPERIENCE_LOG_MAX_FILES = 150  # rotation cap (~130MB). Was 500, which reached 
 
 STATE_PATH = VAR / "_live_state.json"
 TMP_PATH = STATE_PATH.with_suffix(".tmp")
+STATIC_STATE_PATH = VAR / "_static_state.json"
+STATIC_TMP_PATH = STATIC_STATE_PATH.with_suffix(".tmp")
+FIELD_STATE_PATH = VAR / "_field_state.json"
+FIELD_TMP_PATH = FIELD_STATE_PATH.with_suffix(".tmp")
 RESET_PATH = VAR / "_reset_request"
 SPEED_PATH = VAR / "_speed_control.json"
 FOOD_DROP_PATH = VAR / "_food_drops.json"
@@ -249,7 +253,7 @@ def _reset_records():
 # visual smoothness was already decoupled from publish rate, so this has no
 # perceptible cost.
 PUBLISH_INTERVAL = 1.0 / 6.0
-# Field grids (food/pheromone/blood/acid/light/quorum/territory, each a
+# Field grids (food/pheromone/blood/acid/light/quorum, each a
 # 240x240 float array) diffuse/change slowly tick-to-tick -- unlike
 # individuals and species stats, they don't need fresh serialization every
 # single publish. Refreshed only every Nth publish; the state dict reuses
@@ -257,7 +261,7 @@ PUBLISH_INTERVAL = 1.0 / 6.0
 # session's newly-7-fields-wide field serialization cost by ~2/3 with no
 # visible staleness (a few hundred ms behind on a diffusing gradient overlay
 # is imperceptible).
-FIELD_PUBLISH_EVERY = 3
+FIELD_PUBLISH_EVERY = 12
 
 _speed_mtime = None
 _speed_multiplier = None  # None = variable/uncapped (ticks run as fast as the CPU allows)
@@ -380,6 +384,12 @@ def main():
     # world instead of every publish (it was being re-converted from a numpy
     # array to a nested Python list on every single tick for no reason).
     terrain_list = world.terrain_grid().tolist()
+    static_version = int(time.time() * 1000)
+    _write_json(STATIC_STATE_PATH, STATIC_TMP_PATH, {
+        "static_version": static_version,
+        "world_size": WORLD_SIZE,
+        "terrain": terrain_list,
+    })
 
     consecutive_errors = 0
     tick_count = 0
@@ -388,6 +398,7 @@ def main():
     last_encoder_check = time.monotonic()
     publish_count = 0
     cached_fields = None
+    field_version = 0
     while True:
         try:
             if RESET_PATH.exists():
@@ -405,8 +416,15 @@ def main():
                     pass
                 world = _new_world()
                 terrain_list = world.terrain_grid().tolist()
+                static_version = int(time.time() * 1000)
+                _write_json(STATIC_STATE_PATH, STATIC_TMP_PATH, {
+                    "static_version": static_version,
+                    "world_size": WORLD_SIZE,
+                    "terrain": terrain_list,
+                })
                 tick_count = 0
                 cached_fields = None
+                field_version = 0
                 _reset_records()
 
             # world.tick() itself is cheap (~4ms even at 1000+ population,
@@ -458,15 +476,17 @@ def main():
             update_chronicle(alive, tick_count, weather)
 
             if cached_fields is None or publish_count % FIELD_PUBLISH_EVERY == 0:
+                field_version += 1
                 cached_fields = {
+                    "field_version": field_version,
                     "food": world.food().tolist(),
                     "pheromone": world.pheromone().tolist(),
                     "blood": world.blood().tolist(),
                     "acid": world.acid().tolist(),
                     "light": world.light().tolist(),
                     "quorum": world.quorum().tolist(),
-                    "territory": world.territory().tolist(),
                 }
+                _write_json(FIELD_STATE_PATH, FIELD_TMP_PATH, cached_fields)
             publish_count += 1
 
             state = {
@@ -474,8 +494,8 @@ def main():
                 "sim_time": world.sim_time(),
                 "events": world.events(),
                 "weather": weather,
-                "terrain": terrain_list,
-                **cached_fields,
+                "static_version": static_version,
+                "field_version": field_version,
                 "individuals": alive,
                 "corpses": world.corpses_state(),
                 "species": species,
@@ -499,6 +519,10 @@ def main():
 
 
 def _write_state(state):
+    _write_json(STATE_PATH, TMP_PATH, state)
+
+
+def _write_json(path, tmp_path, state):
     """Atomic write-then-replace, with retries: on Windows, os.replace() onto
     a destination file that ANOTHER process currently has open for reading
     can raise PermissionError (WinError 5) -- unlike POSIX, where a rename
@@ -507,10 +531,10 @@ def _write_state(state):
     always enough; if it never clears, skip this write and keep the
     previous (still valid, one-tick-stale) state rather than crashing."""
     payload = orjson.dumps(state)
-    TMP_PATH.write_bytes(payload)
+    tmp_path.write_bytes(payload)
     for attempt in range(5):
         try:
-            TMP_PATH.replace(STATE_PATH)
+            tmp_path.replace(path)
             return
         except OSError:
             if attempt == 4:

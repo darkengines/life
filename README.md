@@ -40,7 +40,7 @@ cp target/release/rust_world.dll \
 # run (two processes)
 cd app
 python sim_worker.py
-python -m uvicorn live_app:app --host 127.0.0.1 --port 8002
+python -m uvicorn live_app:app --host 127.0.0.1 --port 8002 --no-access-log
 ```
 
 Then open <http://127.0.0.1:8002/>.
