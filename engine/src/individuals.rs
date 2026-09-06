@@ -54,6 +54,7 @@ pub const SWIM_EFFORT_IDX: usize = 7;
 /// averaged ~91 degrees, i.e. steering did not control movement at all --
 /// which caps how much any brain can ever matter.
 pub const TURN_BIAS_IDX: usize = 8;
+pub const MEMORY_OUT_IDX: usize = 9;
 pub const FIGHT_URGE_IDX: usize = 3;
 
 pub struct Individuals {
@@ -465,9 +466,10 @@ fn dir_to_angle(d: (i32, i32)) -> f32 {
     (d.1 as f32).atan2(d.0 as f32)
 }
 
-/// Tip-biased weighted growth: appends one pixel to an existing individual,
-/// matching pixel_world.py's `add_one_grown_pixel` exactly (grid-adjacent,
-/// strong bias toward extending a tip in its own direction).
+/// Weighted growth: appends one pixel to an existing individual. Growth is
+/// grid-adjacent and prefers extending an existing tip in its own direction;
+/// the strength of that morphology pressure lives in lib.rs so it can be
+/// measured and tuned explicitly.
 /// Recomputes an individual's cached body-part tally. Must be called after
 /// anything that changes its pixels: birth, growth, or losing a part in
 /// combat. Cheap (bodies are tens of pixels at most) and rare, which is the
@@ -572,7 +574,7 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
                 od_dir == d
             });
             candidates.push((k, d));
-            weights.push(if extends_tip { 8.0 } else { 1.0 });
+            weights.push(if extends_tip { crate::GROWTH_STRAIGHT_TIP_WEIGHT } else { 1.0 });
         }
     }
     if candidates.is_empty() {

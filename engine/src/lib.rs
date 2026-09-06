@@ -88,6 +88,11 @@ pub const CAPTURE_CHEW_CHANCE_MAX: f32 = 0.5;
 // labour a discovery rather than a freebie. Nothing scores a "good" body
 // plan; only these costs and effects exist.
 pub const PART_DIFFERENTIATION_CHANCE: f32 = 0.30;
+// Straight-tip persistence in the body-growth sampler. Kept as a named
+// constant because this is an important morphology pressure, but the current
+// tuned value preserves large-body viability better than lower exploratory
+// settings in the complexity diagnostic.
+pub const GROWTH_STRAIGHT_TIP_WEIGHT: f32 = 8.0;
 // Bilateral symmetry (see pixels.rs). Present in a minority of founders and
 // able to flip either way when a part grows, so paired body plans are
 // something evolution finds and can also lose, not a property of the world.

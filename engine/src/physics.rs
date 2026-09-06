@@ -7,7 +7,7 @@ use rand_distr::{Distribution, Normal};
 use rayon::prelude::*;
 
 use crate::combat;
-use crate::individuals::{ACT_DIM, MEM_DIM, SENSE_DIM};
+use crate::individuals::{ACT_DIM, MEM_DIM, MEMORY_OUT_IDX, SENSE_DIM};
 use crate::spatial::SpatialGrid;
 use crate::terrain::TerrainKind;
 use crate::{Corpse, ExperienceRow, Weather, World};
@@ -975,7 +975,7 @@ pub fn tick(world: &mut World) {
             crate::SWIM_GAIN_MIN + effort * (crate::SWIM_GAIN_MAX - crate::SWIM_GAIN_MIN);
         {
             let offset = world.individuals.pixel_offset[slot] as usize;
-            world.pixels.memory[offset] = [d[7], d[8], d[9], d[10]];
+            world.pixels.memory[offset].copy_from_slice(&d[MEMORY_OUT_IDX..MEMORY_OUT_IDX + MEM_DIM]);
         }
 
         if !is_captured {

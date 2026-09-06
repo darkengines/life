@@ -117,14 +117,20 @@ def load_transitions(max_files=RECENT_CHUNKS):
     Anything else is dropped rather than silently pairing unrelated moments.
     """
     files = sorted(glob.glob(str(LOG_DIR / "*.npz")))[-max_files:]
+    target_shape = None
     S, A, R, S2 = [], [], [], []
-    for f in files:
+    for f in reversed(files):
         try:
             d = np.load(f)
         except Exception:
             continue
         ids, ticks = d["ids"], d["ticks"]
         sense, action = d["sense"], d["action"]
+        shape = (sense.shape[1], action.shape[1])
+        if target_shape is None:
+            target_shape = shape
+        elif shape != target_shape:
+            continue
         reward = d["reward"] if "reward" in d.files else np.zeros(len(ids), dtype=np.float32)
         energy = d["energy"] if "energy" in d.files else np.zeros(len(ids), dtype=np.float32)
         order = np.lexsort((ticks, ids))
@@ -232,6 +238,10 @@ def main():
         tmp = WEIGHTS_PATH.with_suffix(".tmp.npz")
         np.savez(
             tmp,
+            sense_dim=np.array([sense_dim], dtype=np.int32),
+            act_dim=np.array([act_dim], dtype=np.int32),
+            latent_dim=np.array([LATENT_DIM], dtype=np.int32),
+            hidden_dim=np.array([HIDDEN_DIM], dtype=np.int32),
             w=cpu(model.encoder.weight).reshape(-1),
             b=cpu(model.encoder.bias),
             # The learned instinct, in exactly an individual decoder's shape.
@@ -253,6 +263,8 @@ def main():
                      state_loss=last_state, naive_loss=naive, skill_vs_naive=skill,
                      reward_loss=last_reward, reward_var=reward_var,
                      policy_loss=last_policy, device=dev)
+        if os.environ.get("TRAIN_ONCE"):
+            break
         time.sleep(TRAIN_INTERVAL)
 
 
