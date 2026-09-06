@@ -78,7 +78,12 @@ pub const CAPTURE_CHEW_CHANCE_MAX: f32 = 0.5;
 // the animal is in a situation that uses it, which is what makes division of
 // labour a discovery rather than a freebie. Nothing scores a "good" body
 // plan; only these costs and effects exist.
-pub const PART_DIFFERENTIATION_CHANCE: f32 = 0.30; // odds a newly grown part is an organ rather than plain body
+pub const PART_DIFFERENTIATION_CHANCE: f32 = 0.30;
+// Bilateral symmetry (see pixels.rs). Present in a minority of founders and
+// able to flip either way when a part grows, so paired body plans are
+// something evolution finds and can also lose, not a property of the world.
+pub const SYMMETRY_FOUNDER_CHANCE: f32 = 0.35;
+pub const SYMMETRY_FLIP_CHANCE: f32 = 0.06; // odds a newly grown part is an organ rather than plain body
 // Upkeep multiplier applied to PER_PIXEL_METABOLISM, indexed by part kind
 // (body, eye, mouth, gut, tentacle, armor, flipper). Plain body is the
 // cheapest thing you can be made of.
@@ -454,7 +459,23 @@ pub const RECENT_FEED_WINDOW: u32 = 150;
 // equivalent biological constraint here -- gestation/nursing is asymmetric
 // in real biology, and this makes reproduction genuinely bounded by more
 // than "find a mate + have energy" for the sex that actually bears young).
+// Base recovery after birth, before the size term. See gestation_ticks():
+// total gestation grows with the offspring's part count, so a 20-part animal
+// waits roughly 25 + 60 ticks against a small one's 25 + 6.
 pub const FEMALE_REPRODUCTION_COOLDOWN: u32 = 25;
+pub const GESTATION_TICKS_PER_PART: f32 = 3.0;
+// Space and safety as preconditions for breeding. Together these make
+// reproduction density-dependent and locally regulated: a crowded or
+// recently-violent patch simply does not produce offspring, so population is
+// checked where it is dense rather than by a global ceiling, and there is
+// real pressure to disperse into quieter water or into the reef.
+pub const BREEDING_SPACE_RADIUS: f32 = 9.0;
+pub const BREEDING_SPACE_MAX_NEIGHBORS: f32 = 6.0;
+pub const BREEDING_SPACE_SIZE_PENALTY: f32 = 0.06; // bigger bodies need proportionally more room
+pub const BREEDING_SAFETY_BLOOD_MAX: f32 = 0.35;
+// Credited to an individual the moment it successfully reproduces, for
+// the experience log the future replay training will consume.
+pub const REWARD_REPRODUCE: f32 = 1.0;
 
 pub const WEATHER_TRIGGER_CHANCE: f64 = 0.0006;
 
@@ -489,6 +510,10 @@ pub struct ExperienceRow {
     pub sense: Vec<f32>,
     pub action: Vec<f32>,
     pub energy: f32,
+    /// Reward credited since this individual was last sampled. Currently
+    /// reproduction events; energy deltas remain derivable offline from
+    /// consecutive rows sharing an id.
+    pub reward: f32,
 }
 
 #[pyclass]
@@ -542,6 +567,17 @@ pub struct World {
     // reason as pathogen_damage_rate: sweeping a compile-time constant
     // against a fixed seed is impossible in a single run.
     pub repro_cost_per_part: f32,
+
+    // The world's shared perception encoder (see individuals::encode). One
+    // matrix for every creature alive, initialised randomly. A random
+    // projection already preserves enough structure to be a usable feature
+    // basis, and it removes the impossible job each individual previously
+    // had of evolving its own feature extractor from raw senses. This is
+    // also precisely the object a GPU replay-training process would improve:
+    // swap better weights in here and every creature perceives better
+    // without any of them losing their own evolved decision-making.
+    pub shared_enc_w: Vec<f32>,
+    pub shared_enc_b: Vec<f32>,
 }
 
 #[pymethods]
@@ -553,6 +589,14 @@ impl World {
         let mut rng = Pcg64::seed_from_u64(seed);
         let terrain = Terrain::generate(size, &mut rng);
         let fields = Fields::new(size, food_cap, &terrain, &mut rng, n_food_patches);
+        let enc_len = individuals::LATENT_DIM * individuals::SENSE_DIM;
+        // Xavier-ish scale so the latent starts well inside tanh's useful
+        // range instead of saturating on the first forward pass.
+        let enc_scale = (1.0 / individuals::SENSE_DIM as f32).sqrt();
+        let shared_enc_w: Vec<f32> = (0..enc_len)
+            .map(|_| rng.random_range(-1.0f32..1.0f32) * enc_scale * 2.0)
+            .collect();
+        let shared_enc_b: Vec<f32> = (0..individuals::LATENT_DIM).map(|_| 0.0f32).collect();
         World {
             size,
             pop_cap,
@@ -581,6 +625,8 @@ impl World {
             experience_log: Vec::new(),
             pathogen_damage_rate: PATHOGEN_DAMAGE_RATE,
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
+            shared_enc_w,
+            shared_enc_b,
         }
     }
 
@@ -873,12 +919,14 @@ impl World {
         let mut sense_flat = Vec::with_capacity(n * sense_dim);
         let mut action_flat = Vec::with_capacity(n * act_dim);
         let mut energy = Vec::with_capacity(n);
+        let mut reward = Vec::with_capacity(n);
         for row in rows {
             ids.push(row.id);
             ticks.push(row.tick);
             sense_flat.extend_from_slice(&row.sense);
             action_flat.extend_from_slice(&row.action);
             energy.push(row.energy);
+            reward.push(row.reward);
         }
         let sense_arr = Array2::from_shape_vec((n, sense_dim), sense_flat).unwrap();
         let action_arr = Array2::from_shape_vec((n, act_dim), action_flat).unwrap();
@@ -888,6 +936,7 @@ impl World {
         d.set_item("sense", sense_arr.into_pyarray(py)).unwrap();
         d.set_item("action", action_arr.into_pyarray(py)).unwrap();
         d.set_item("energy", PyArray1::from_vec(py, energy)).unwrap();
+        d.set_item("reward", PyArray1::from_vec(py, reward)).unwrap();
         Some(d)
     }
     fn terrain_grid<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<i32>> { self.terrain.as_2d().into_pyarray(py) }

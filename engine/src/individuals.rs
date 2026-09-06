@@ -19,6 +19,20 @@ pub const MEM_DIM: usize = 4;
 //  *root_memory]
 pub const SENSE_DIM: usize = 30 + MEM_DIM;
 pub const HIDDEN_DIM: usize = 12;
+/// Width of the shared perception latent. Every individual's raw senses are
+/// compressed through ONE encoder shared by the whole world, and each
+/// individual then decides from that latent with its OWN evolved decoder.
+///
+/// The reason is measured: evolved brains were performing no better than
+/// random ones at steering toward food. Each individual was having to
+/// rediscover, by mutation alone, how to extract meaning from 34 raw sensory
+/// channels -- roughly 560 weights per animal, with credit assignment coming
+/// only from whether it happened to survive. Sharing the perception stage
+/// means feature extraction is learned once across the whole population's
+/// experience, while the decision stays private and evolvable, which is what
+/// keeps behavioural diversity intact. It also cuts each individual's evolved
+/// parameters roughly in half, so mutation has far less to search.
+pub const LATENT_DIM: usize = 12;
 // [move_x, move_y, reproduce_urge, fight_urge, crawl_intent, acid_intent,
 //  light_intent, *new_memory]
 pub const ACT_DIM: usize = 7 + MEM_DIM;
@@ -77,6 +91,12 @@ pub struct Individuals {
     // part bitten off), so the per-tick effect lookups stay O(1) instead of
     // rescanning every pixel of every individual every tick.
     pub part_counts: Vec<[u8; crate::pixels::PART_KIND_COUNT as usize]>,
+    // Reward accumulated since this individual was last sampled into the
+    // experience log. Reproduction is the event worth rewarding -- it is the
+    // only thing that actually propagates a policy -- and crediting it at the
+    // moment it happens is what a replay-trained network needs, since energy
+    // deltas alone never explain why an action mattered. Zeroed on sampling.
+    pub pending_reward: Vec<f32>,
     pub memory_transmission_rate: Vec<f32>,
     pub weight_transmission_rate: Vec<f32>,
     // The STABLE ID (never a slot index) of whoever this individual is
@@ -156,6 +176,7 @@ impl Individuals {
             home_pos: Vec::with_capacity(cap),
             disease_resistance: Vec::with_capacity(cap),
             part_counts: Vec::with_capacity(cap),
+            pending_reward: Vec::with_capacity(cap),
             memory_transmission_rate: Vec::with_capacity(cap),
             weight_transmission_rate: Vec::with_capacity(cap),
             attached_to: Vec::with_capacity(cap),
@@ -209,6 +230,7 @@ impl Individuals {
             self.home_pos.push([0.0, 0.0]);
             self.disease_resistance.push(0.0);
             self.part_counts.push([0; crate::pixels::PART_KIND_COUNT as usize]);
+            self.pending_reward.push(0.0);
             self.memory_transmission_rate.push(0.0);
             self.weight_transmission_rate.push(0.0);
             self.attached_to.push(-1);
@@ -221,7 +243,7 @@ impl Individuals {
             self.ticks_since_reproduced.push(u32::MAX); // never reproduced yet -- cooldown trivially satisfied
             self.pixel_offset.push(0);
             self.pixel_count.push(0);
-            self.brain_w1.extend(std::iter::repeat(0.0).take(HIDDEN_DIM * SENSE_DIM));
+            self.brain_w1.extend(std::iter::repeat(0.0).take(HIDDEN_DIM * LATENT_DIM));
             self.brain_b1.extend(std::iter::repeat(0.0).take(HIDDEN_DIM));
             self.brain_w2.extend(std::iter::repeat(0.0).take(ACT_DIM * HIDDEN_DIM));
             self.brain_b2.extend(std::iter::repeat(0.0).take(ACT_DIM));
@@ -252,8 +274,8 @@ impl Individuals {
     }
 
     fn brain_w1_mut(&mut self, slot: usize) -> &mut [f32] {
-        let s = slot * HIDDEN_DIM * SENSE_DIM;
-        &mut self.brain_w1[s..s + HIDDEN_DIM * SENSE_DIM]
+        let s = slot * HIDDEN_DIM * LATENT_DIM;
+        &mut self.brain_w1[s..s + HIDDEN_DIM * LATENT_DIM]
     }
     fn brain_b1_mut(&mut self, slot: usize) -> &mut [f32] {
         let s = slot * HIDDEN_DIM;
@@ -269,8 +291,8 @@ impl Individuals {
     }
 
     pub fn brain_w1(&self, slot: usize) -> &[f32] {
-        let s = slot * HIDDEN_DIM * SENSE_DIM;
-        &self.brain_w1[s..s + HIDDEN_DIM * SENSE_DIM]
+        let s = slot * HIDDEN_DIM * LATENT_DIM;
+        &self.brain_w1[s..s + HIDDEN_DIM * LATENT_DIM]
     }
     pub fn brain_b1(&self, slot: usize) -> &[f32] {
         let s = slot * HIDDEN_DIM;
@@ -324,7 +346,26 @@ impl Individuals {
         for (dst, src) in self.brain_b2_mut(child_slot).iter_mut().zip(b2.iter()) { *dst = mix(rng, *src, transmission_rate, 0.1); }
     }
 
-    pub fn decide(&self, slot: usize, sense: &[f32; SENSE_DIM]) -> [f32; ACT_DIM] {
+    /// Shared perception: raw senses -> latent. One encoder for the entire
+    /// world, so this is where a GPU-trained representation would be dropped
+    /// in; nothing else about the individual changes when it improves.
+    pub fn encode(sense: &[f32; SENSE_DIM], enc_w: &[f32], enc_b: &[f32]) -> [f32; LATENT_DIM] {
+        let mut z = [0f32; LATENT_DIM];
+        for j in 0..LATENT_DIM {
+            let mut acc = enc_b[j];
+            let row = j * SENSE_DIM;
+            for k in 0..SENSE_DIM {
+                acc += enc_w[row + k] * sense[k];
+            }
+            z[j] = acc.tanh();
+        }
+        z
+    }
+
+    /// Private decision: latent -> action, using this individual's own
+    /// evolved weights. Perception is shared; what to DO about it is not.
+    pub fn decide(&self, slot: usize, sense: &[f32; SENSE_DIM], enc_w: &[f32], enc_b: &[f32]) -> [f32; ACT_DIM] {
+        let z = Self::encode(sense, enc_w, enc_b);
         let w1 = self.brain_w1(slot);
         let b1 = self.brain_b1(slot);
         let w2 = self.brain_w2(slot);
@@ -332,8 +373,8 @@ impl Individuals {
         let mut h = [0f32; HIDDEN_DIM];
         for j in 0..HIDDEN_DIM {
             let mut acc = b1[j];
-            for k in 0..SENSE_DIM {
-                acc += w1[j * SENSE_DIM + k] * sense[k];
+            for k in 0..LATENT_DIM {
+                acc += w1[j * LATENT_DIM + k] * z[k];
             }
             h[j] = acc.tanh();
         }
@@ -441,8 +482,23 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
     let (parent_local, dir) = candidates[choice];
     let new_angle = dir_to_angle(dir);
 
-    // Reallocate one pixel larger, copy, append, free the old block.
-    let new_offset = pixels.allocate(count + 1);
+    // Bilateral symmetry: growing on a symmetric node emits a mirrored twin
+    // on the same node, reflected across the body's long axis (dy -> -dy).
+    // A direction lying ON that axis is its own mirror, so it stays single.
+    // The twin is only added if its cell is actually free, so symmetry never
+    // overwrites existing anatomy.
+    let mirror_dir = (dir.0, -dir.1);
+    let mirror_pos = {
+        let base = grid_pos[parent_local];
+        (base.0 + mirror_dir.0, base.1 + mirror_dir.1)
+    };
+    let make_pair = pixels.symmetric[offset as usize + parent_local]
+        && dir.1 != 0
+        && !occupied.contains(&mirror_pos);
+    let added: u32 = if make_pair { 2 } else { 1 };
+
+    // Reallocate for the new part(s), copy, append, free the old block.
+    let new_offset = pixels.allocate(count + added);
     for k in 0..count as usize {
         pixels.parent_idx[new_offset as usize + k] = pixels.parent_idx[offset as usize + k];
         pixels.rest_angle[new_offset as usize + k] = pixels.rest_angle[offset as usize + k];
@@ -454,6 +510,7 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
         pixels.max_angle[new_offset as usize + k] = pixels.max_angle[offset as usize + k];
         pixels.health[new_offset as usize + k] = pixels.health[offset as usize + k];
         pixels.part_type[new_offset as usize + k] = pixels.part_type[offset as usize + k];
+        pixels.symmetric[new_offset as usize + k] = pixels.symmetric[offset as usize + k];
     }
     let parent_flex = pixels.flex[new_offset as usize + parent_local];
     let parent_storage = pixels.storage[new_offset as usize + parent_local];
@@ -486,12 +543,37 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
     pixels.min_angle[new_offset as usize + count as usize] = new_min;
     pixels.max_angle[new_offset as usize + count as usize] = new_max;
     pixels.health[new_offset as usize + count as usize] = crate::BASE_PIXEL_HEALTH * new_size;
+    // Symmetry is itself heritable: a new part usually matches its parent
+    // node, but can flip, so bilateral body plans can both arise and be lost.
+    let parent_symmetric = pixels.symmetric[new_offset as usize + parent_local];
+    pixels.symmetric[new_offset as usize + count as usize] =
+        if rng.random::<f32>() < crate::SYMMETRY_FLIP_CHANCE { !parent_symmetric } else { parent_symmetric };
+
+    if make_pair {
+        // The twin is the same KIND of part with the same anatomy, placed at
+        // the reflected angle -- a left/right pair, not two random growths.
+        let t = new_offset as usize + count as usize;      // the part just written
+        let m = new_offset as usize + count as usize + 1;  // its mirror
+        pixels.parent_idx[m] = parent_local as i32;
+        pixels.rest_angle[m] = dir_to_angle(mirror_dir);
+        pixels.flex[m] = pixels.flex[t];
+        pixels.storage[m] = pixels.storage[t];
+        pixels.memory[m] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
+        pixels.part_type[m] = pixels.part_type[t];
+        pixels.size[m] = pixels.size[t];
+        // Hinge limits mirror too, so the pair bends symmetrically rather
+        // than one side flapping while the other is locked.
+        pixels.min_angle[m] = -pixels.max_angle[t];
+        pixels.max_angle[m] = -pixels.min_angle[t];
+        pixels.health[m] = pixels.health[t];
+        pixels.symmetric[m] = pixels.symmetric[t];
+    }
 
     if count > 0 {
         pixels.free(offset, count);
     }
     individuals.pixel_offset[slot] = new_offset;
-    individuals.pixel_count[slot] = count + 1;
+    individuals.pixel_count[slot] = count + added;
     recompute_part_counts(individuals, pixels, slot);
     true
 }
@@ -559,6 +641,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     individuals.pixel_offset[slot] = offset;
     individuals.pixel_count[slot] = 1;
     pixels.part_type[offset as usize] = crate::pixels::PART_BODY;
+    pixels.symmetric[offset as usize] = rng.random::<f32>() < crate::SYMMETRY_FOUNDER_CHANCE;
     recompute_part_counts(individuals, pixels, slot);
     individuals.randomize_brain(slot, rng);
     individuals.id_to_slot.insert(individuals.id[slot], slot);
@@ -581,6 +664,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
         pixels.flex[new_offset as usize + k] = pixels.flex[parent_offset as usize + k];
         pixels.storage[new_offset as usize + k] = pixels.storage[parent_offset as usize + k];
         pixels.part_type[new_offset as usize + k] = pixels.part_type[parent_offset as usize + k];
+        pixels.symmetric[new_offset as usize + k] = pixels.symmetric[parent_offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[parent_offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[parent_offset as usize + k];
         pixels.max_angle[new_offset as usize + k] = pixels.max_angle[parent_offset as usize + k];

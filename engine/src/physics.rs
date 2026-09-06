@@ -171,6 +171,19 @@ pub(crate) fn grid_xy(world: &World, pos: [f32; 2]) -> (u32, u32) {
 /// That framing is what makes it actually useful as a suppress-aggression
 /// signal: it's only large exactly when a fight/crowd-pressure decision
 /// about a nearby target is also being made.
+/// How long a female must recover after giving birth, scaled by the size of
+/// the body she is building. A flat cooldown meant a thirty-part animal
+/// turned offspring around as fast as a two-part one, so large size carried
+/// no reproductive penalty at all and there was nothing separating a fast-
+/// breeding small strategy from a slow-investing large one. Gestation
+/// growing with offspring size is the standard size-structured population
+/// regulator, and it is what lets big animals be rare without being
+/// artificially capped.
+pub(crate) fn gestation_ticks(world: &World, slot: usize) -> u32 {
+    let parts = world.individuals.pixel_count[slot] as f32;
+    crate::FEMALE_REPRODUCTION_COOLDOWN + (crate::GESTATION_TICKS_PER_PART * parts) as u32
+}
+
 /// Returns (similarity to the most-similar nearby individual, total
 /// CONSPECIFIC density around this one). The second value is the sum of
 /// kin-similarity over all neighbors, so a near-identical neighbor counts
@@ -318,7 +331,7 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
             if best_prey.map_or(true, |(bd, _)| d < bd) { best_prey = Some((d, delta)); }
         }
         let other_mature = world.individuals.age[other] as f32 >= crate::MATURITY_AGE * world.maturity_multiplier;
-        let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= crate::FEMALE_REPRODUCTION_COOLDOWN;
+        let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= gestation_ticks(world, other);
         if world.individuals.female[other] != my_female && other_mature && other_recovered {
             if best_mate.map_or(true, |(bd, _)| d < bd) { best_mate = Some((d, delta)); }
         }
@@ -451,6 +464,7 @@ fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
         // (re)allocated block, corrupting evolved anatomy on every fight.
         world.pixels.storage[(new_offset + w) as usize] = world.pixels.storage[(offset + k) as usize];
         world.pixels.part_type[(new_offset + w) as usize] = world.pixels.part_type[(offset + k) as usize];
+        world.pixels.symmetric[(new_offset + w) as usize] = world.pixels.symmetric[(offset + k) as usize];
         world.pixels.size[(new_offset + w) as usize] = world.pixels.size[(offset + k) as usize];
         world.pixels.min_angle[(new_offset + w) as usize] = world.pixels.min_angle[(offset + k) as usize];
         world.pixels.max_angle[(new_offset + w) as usize] = world.pixels.max_angle[(offset + k) as usize];
@@ -548,7 +562,11 @@ fn update_weather(world: &mut World) {
 /// individual within MATE_RADIUS of anyone at all, this made passive
 /// clustering strictly more reproductively successful than exploring --
 /// exactly backwards from what mobility should buy an individual.
-fn has_nearby_mate(world: &World, slot: usize, grid: &SpatialGrid) -> bool {
+/// Returns (an eligible mate is in range, how many living neighbours are
+/// within breeding distance). The crowd count comes free from the scan that
+/// was already happening for mate-finding, and feeds the space requirement
+/// in the reproduction gate.
+fn mate_and_crowding(world: &World, slot: usize, grid: &SpatialGrid) -> (bool, u32) {
     let pos = world.individuals.root_pos[slot];
     let my_female = world.individuals.female[slot];
     // MUST be nearby_radius, not nearby: the latter only ever searches one
@@ -560,17 +578,23 @@ fn has_nearby_mate(world: &World, slot: usize, grid: &SpatialGrid) -> bool {
     // made mates far scarcer than designed, which is a large part of why
     // thinned-out populations slid into the Allee trap and went extinct
     // instead of recovering.
+    let mut crowd = 0u32;
+    let mut found_mate = false;
     for other in grid.nearby_radius(pos, crate::MATE_RADIUS) {
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
+        if dist(world.individuals.root_pos[other], pos) < crate::BREEDING_SPACE_RADIUS {
+            crowd += 1;
+        }
+        if found_mate { continue; }
         if world.individuals.female[other] == my_female { continue; }
         let other_mature = world.individuals.age[other] as f32 >= crate::MATURITY_AGE * world.maturity_multiplier;
         if !other_mature { continue; }
-        let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= crate::FEMALE_REPRODUCTION_COOLDOWN;
+        let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= gestation_ticks(world, other);
         if !other_recovered { continue; }
-        if dist(world.individuals.root_pos[other], pos) < crate::MATE_RADIUS { return true; }
+        if dist(world.individuals.root_pos[other], pos) < crate::MATE_RADIUS { found_mate = true; }
     }
-    false
+    (found_mate, crowd)
 }
 
 /// Test-only helper behind `debug_conspecific_densities`: rebuilds the
@@ -795,7 +819,7 @@ pub fn tick(world: &mut World) {
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
-            let d: [f32; ACT_DIM] = world.individuals.decide(slot, &s);
+            let d: [f32; ACT_DIM] = world.individuals.decide(slot, &s, &world.shared_enc_w, &world.shared_enc_b);
             let cached_ok = pos_cache[slot].as_ref().map_or(false, |p| p.len() == world.individuals.pixel_count[slot] as usize);
             let (ind_pos, ind_vel) = if cached_ok {
                 (pos_cache[slot].clone().unwrap(), vel_cache[slot].clone().unwrap())
@@ -816,6 +840,7 @@ pub fn tick(world: &mut World) {
                     sense: s.to_vec(),
                     action: d.to_vec(),
                     energy: world.individuals.energy[slot],
+                    reward: world.individuals.pending_reward[slot],
                 })
             } else {
                 None
@@ -1108,7 +1133,7 @@ pub fn tick(world: &mut World) {
 
             let t_repro_0 = std::time::Instant::now();
             let recovery_ok = !world.individuals.female[slot]
-                || world.individuals.ticks_since_reproduced[slot] >= crate::FEMALE_REPRODUCTION_COOLDOWN;
+                || world.individuals.ticks_since_reproduced[slot] >= gestation_ticks(world, slot);
             // Building a child costs what the child actually IS. This was a
             // flat 8.0 regardless of body size, which meant a thirty-part
             // animal produced a thirty-one-part offspring for the same price
@@ -1118,6 +1143,22 @@ pub fn tick(world: &mut World) {
             // bodies breed cheaply and often, large ones invest heavily and
             // rarely, and the population limits itself through the energy
             // budget instead of slamming into an artificial cap.
+            // Breeding needs room and calm, not just energy and a partner.
+            // A big animal needs proportionally more space, so crowding
+            // throttles reproduction locally -- population limits itself
+            // where it is dense instead of everywhere at once via a global
+            // cap, and it creates real pressure to disperse or to find a
+            // quiet corner of the reef to breed in.
+            let (has_mate, crowd) = mate_and_crowding(world, slot, &grid);
+            let allowed_crowd = (crate::BREEDING_SPACE_MAX_NEIGHBORS as f32
+                / (1.0 + world.individuals.pixel_count[slot] as f32 * crate::BREEDING_SPACE_SIZE_PENALTY))
+                .max(1.0);
+            let space_ok = (crowd as f32) <= allowed_crowd;
+            // Safety: blood in the water means something was just killed
+            // here. Nothing breeds in the middle of that.
+            let local_blood = crate::fields::Fields::sample(
+                &world.fields.blood, world.size, world.individuals.root_pos[slot]);
+            let safe_ok = local_blood < crate::BREEDING_SAFETY_BLOOD_MAX;
             let offspring_parts = world.individuals.pixel_count[slot] as f32 + 1.0;
             let repro_cost = crate::REPRODUCE_BASE_COST
                 + world.repro_cost_per_part * offspring_parts;
@@ -1130,9 +1171,12 @@ pub fn tick(world: &mut World) {
                 && world.individuals.size_scale[slot] >= crate::ADULT_SIZE_SCALE
                 && world.individuals.ticks_since_fed[slot] < crate::RECENT_FEED_WINDOW
                 && recovery_ok
-                && has_nearby_mate(world, slot, &grid)
+                && space_ok
+                && safe_ok
+                && has_mate
             {
                 world.individuals.energy[slot] -= repro_cost;
+                world.individuals.pending_reward[slot] += crate::REWARD_REPRODUCE;
                 world.individuals.ticks_since_reproduced[slot] = 0;
                 let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot);
                 // A child's root_pos is parent_pos + small random offset,
@@ -1248,10 +1292,18 @@ pub fn tick(world: &mut World) {
     world.timings = timings;
 }
 
+/// Bodies pushing each other apart. The contact distance is derived from the
+/// ACTUAL size of the two parts in contact rather than a flat radius: a part
+/// scaled to twice normal occupies twice the space and should repel from
+/// twice as far. With a flat radius, large creatures repelled only within
+/// 1.2 units while being drawn several units across, so they visibly stacked
+/// and piled through one another -- they had no real physical extent.
 fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &SpatialGrid, pos_cache: &[Option<Vec<[f32; 2]>>]) -> [f32; 2] {
     let mut push = [0f32; 2];
     let my_pos = world.individuals.root_pos[slot];
     let my_size = ind_pos.len() as f32;
+    let my_offset = world.individuals.pixel_offset[slot] as usize;
+    let my_scale = world.individuals.size_scale[slot];
     for other in grid.nearby(my_pos) {
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
@@ -1261,15 +1313,22 @@ fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &Spatia
             Some(p) if p.len() == world.individuals.pixel_count[other] as usize => p,
             _ => continue,
         };
-        for &p in ind_pos.iter() {
+        let other_offset = world.individuals.pixel_offset[other] as usize;
+        let other_scale = world.individuals.size_scale[other];
+        for (pi, &p) in ind_pos.iter().enumerate() {
             let mut best_d = f32::MAX;
             let mut best = [0f32; 2];
-            for &op in other_pos.iter() {
+            let mut best_oi = 0usize;
+            for (oi, &op) in other_pos.iter().enumerate() {
                 let d = dist(p, op);
-                if d < best_d { best_d = d; best = op; }
+                if d < best_d { best_d = d; best = op; best_oi = oi; }
             }
-            if best_d > 1e-6 && best_d < crate::COLLISION_RADIUS {
-                let overlap = crate::COLLISION_RADIUS - best_d;
+            let reach = crate::COLLISION_RADIUS
+                * 0.5
+                * (world.pixels.size[my_offset + pi] * my_scale
+                    + world.pixels.size[other_offset + best_oi] * other_scale);
+            if best_d > 1e-6 && best_d < reach {
+                let overlap = reach - best_d;
                 push[0] += (p[0] - best[0]) / best_d * overlap * crate::COLLISION_STIFFNESS;
                 push[1] += (p[1] - best[1]) / best_d * overlap * crate::COLLISION_STIFFNESS;
             }

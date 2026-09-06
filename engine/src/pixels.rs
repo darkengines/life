@@ -51,6 +51,15 @@ pub struct PixelArena {
     // rewards any particular combination -- only the costs and effects
     // exist, exactly like every other trait here.
     pub part_type: Vec<u8>,
+    // Bilateral symmetry, heritable per NODE. When a new component grows on a
+    // node carrying this, a mirrored counterpart appears on the same node at
+    // the reflected angle -- so organs arrive in left/right pairs. This is
+    // one of the genuine major body-plan innovations in animal evolution
+    // (bilateria), and it is what makes a shape read as an animal rather than
+    // a lump: paired eyes, paired flippers, paired tentacles. It stays
+    // evolvable rather than universal, because a pair costs twice the upkeep
+    // and is only worth it where balanced propulsion or stereo sensing pays.
+    pub symmetric: Vec<bool>,
     free_blocks: Vec<(u32, u32)>, // (offset, length), kept sorted by offset
 }
 
@@ -71,6 +80,7 @@ impl PixelArena {
             parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), memory: Vec::new(), storage: Vec::new(),
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
             part_type: Vec::new(),
+            symmetric: Vec::new(),
             free_blocks: Vec::new(),
         }
     }
@@ -98,6 +108,7 @@ impl PixelArena {
         self.max_angle.resize(new_len as usize, 1.0);
         self.health.resize(new_len as usize, crate::BASE_PIXEL_HEALTH);
         self.part_type.resize(new_len as usize, PART_BODY);
+        self.symmetric.resize(new_len as usize, false);
         offset
     }
 
