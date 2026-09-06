@@ -116,6 +116,18 @@ pub const GUT_DIGESTION_MAX: f32 = 3.0;
 // whatever it grabbed first for as long as a tiny meal took to finish, and
 // could never work through several small victims in succession.
 pub const CHEW_DOMINANCE_MAX: f32 = 8.0;
+// One sweep can catch several victims: how much body mass buys each extra
+// simultaneous target. Without this a large animal landed a single blow per
+// tick while every small creature around it landed its own, which made size
+// a liability instead of an advantage.
+pub const SWEEP_MASS_PER_TARGET: f32 = 7.0;
+// Gape limit. Prey this many times lighter than the predator is swallowed
+// whole rather than chewed down part by part; mouths widen the gape, so
+// what an animal can engulf is a real consequence of its anatomy. Efficiency
+// is below 1 because swallowing whole wastes more than careful feeding does.
+pub const ENGULF_SIZE_RATIO: f32 = 4.0;
+pub const ENGULF_EFFICIENCY: f32 = 0.75;
+pub const ENGULF_GAPE_MIN: f32 = 2.5;
 // Prey struggling out of a grip. Per-tick escape odds are this base scaled
 // by the victim's size advantage, so something that grabbed prey larger
 // than itself loses it quickly while genuinely outmatched prey rarely gets
@@ -362,6 +374,11 @@ pub const DISEASE_RESISTANCE_METABOLIC_COST: f32 = 0.012;
 // pass; this just checks a cheap modulo on ones already being visited).
 // The cap is a hard ceiling on memory if nothing ever drains the buffer.
 pub const EXPERIENCE_SAMPLE_STRIDE: u64 = 200;
+/// How many consecutive ticks an individual is logged for once its turn
+/// comes round. Consecutive rows are what make (state, action) -> next state
+/// learnable; isolated snapshots taken 200 ticks apart cannot express
+/// consequences at all.
+pub const EXPERIENCE_TRAJECTORY_LEN: u64 = 8;
 pub const EXPERIENCE_LOG_CAP: usize = 500_000;
 
 pub const CRAWL_FLOOR_THRESHOLD: f32 = 15.0;
@@ -1036,6 +1053,33 @@ impl World {
                 self.rng = rng;
             }
         }
+    }
+
+    /// Installs new shared-encoder weights, as produced by the asynchronous
+    /// training process. Every creature immediately perceives through the
+    /// improved representation while keeping its own evolved decision layer
+    /// untouched -- which is the whole point of separating perception from
+    /// decision. Rejected (rather than panicking) if the shapes are wrong,
+    /// since this is fed from a file written by another process.
+    fn set_shared_encoder(&mut self, w: Vec<f32>, b: Vec<f32>) -> bool {
+        let want_w = individuals::LATENT_DIM * individuals::SENSE_DIM;
+        if w.len() != want_w || b.len() != individuals::LATENT_DIM {
+            return false;
+        }
+        self.shared_enc_w = w;
+        self.shared_enc_b = b;
+        true
+    }
+
+    /// The current shared-encoder weights, so the trainer can warm-start
+    /// from what the world is actually using.
+    fn shared_encoder<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        let d = PyDict::new(py);
+        d.set_item("w", PyArray1::from_slice(py, &self.shared_enc_w)).unwrap();
+        d.set_item("b", PyArray1::from_slice(py, &self.shared_enc_b)).unwrap();
+        d.set_item("latent_dim", individuals::LATENT_DIM).unwrap();
+        d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
+        d
     }
 
     /// Test-only: overrides the per-part reproduction cost for a sweep.

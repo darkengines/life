@@ -58,6 +58,11 @@ FOUNDER_COUNT = 300  # was 160 -- a bigger world needs more founders to avoid th
 # built; nothing currently reads these files back.
 VAR = Path(__file__).resolve().parent.parent / "var"
 EXPERIENCE_LOG_DIR = VAR / "experience_log"
+# Weights produced by the asynchronous GPU trainer (app/train_encoder.py).
+# The simulation never waits on training: it just picks up better perception
+# whenever the file changes, and runs perfectly well if it never does.
+ENCODER_WEIGHTS_PATH = VAR / "shared_encoder.npz"
+ENCODER_RELOAD_INTERVAL = 20.0
 EXPERIENCE_FLUSH_INTERVAL = 30.0  # seconds -- infrequent on purpose, this is background data collection, not a hot path
 EXPERIENCE_LOG_MAX_FILES = 150  # rotation cap (~130MB). Was 500, which reached 446MB on disk for data nothing consumes yet;
                                 # raise it again once a training process actually reads these.
@@ -305,6 +310,32 @@ def _apply_food_drops(world):
             pass
 
 
+_encoder_mtime = None
+
+
+def _maybe_load_encoder(world):
+    """Hot-load trained shared-encoder weights if the trainer wrote new ones.
+
+    Best-effort by design: a missing, half-written or wrong-shaped file just
+    means the world keeps the perception it already has."""
+    global _encoder_mtime
+    try:
+        mtime = ENCODER_WEIGHTS_PATH.stat().st_mtime
+    except OSError:
+        return
+    if mtime == _encoder_mtime:
+        return
+    _encoder_mtime = mtime
+    try:
+        d = np.load(ENCODER_WEIGHTS_PATH)
+        ok = world.set_shared_encoder(d["w"].astype(np.float32).tolist(),
+                                      d["b"].astype(np.float32).tolist())
+        print(f"[encoder] {'loaded trained weights' if ok else 'rejected weights (shape mismatch)'}",
+              flush=True)
+    except Exception as e:
+        print(f"[encoder] load failed (non-fatal): {e}", flush=True)
+
+
 def _flush_experience_log(world, tick_count):
     """Drains the Rust-side sampled-transition buffer and writes it as one
     .npz chunk. Best-effort: a failure here (disk full, permissions) should
@@ -326,6 +357,7 @@ def _flush_experience_log(world, tick_count):
             sense=batch["sense"],
             action=batch["action"],
             energy=batch["energy"],
+            reward=batch["reward"],
         )
         files = sorted(EXPERIENCE_LOG_DIR.glob("exp_*.npz"))
         if len(files) > EXPERIENCE_LOG_MAX_FILES:
@@ -346,6 +378,7 @@ def main():
     tick_count = 0
     last_publish = time.monotonic()
     last_experience_flush = time.monotonic()
+    last_encoder_check = time.monotonic()
     publish_count = 0
     cached_fields = None
     while True:
@@ -401,6 +434,9 @@ def main():
                     time.sleep(remaining)
 
             now = time.monotonic()
+            if now - last_encoder_check >= ENCODER_RELOAD_INTERVAL:
+                last_encoder_check = now
+                _maybe_load_encoder(world)
             if now - last_experience_flush >= EXPERIENCE_FLUSH_INTERVAL:
                 last_experience_flush = now
                 _flush_experience_log(world, tick_count)

@@ -833,7 +833,14 @@ pub fn tick(world: &mut World) {
             // state, per the comment above): a modulo on slot+tick spreads
             // coverage across the whole population over time instead of
             // always logging the same low-slot individuals.
-            let sample = if (slot as u64 + world.tick_count) % crate::EXPERIENCE_SAMPLE_STRIDE == 0 {
+            // Log a short CONSECUTIVE run of ticks per individual rather than
+            // isolated snapshots. Samples 200 ticks apart cannot express what
+            // followed an action, so nothing temporal could ever be learned
+            // from them. Keeping the condition a pure function of slot and
+            // tick means this still needs no state and stays safe inside the
+            // parallel phase.
+            let phase = (slot as u64 + world.tick_count) % crate::EXPERIENCE_SAMPLE_STRIDE;
+            let sample = if phase < crate::EXPERIENCE_TRAJECTORY_LEN {
                 Some(ExperienceRow {
                     id: world.individuals.id[slot],
                     tick: world.tick_count,
@@ -1359,6 +1366,15 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
     let fastest = speeds.iter().cloned().fold(0.0f32, |a, b| a.max(b));
     let my_pos = world.individuals.root_pos[slot];
     let my_size = ind_pos.len() as f32;
+    // How many separate victims this body can strike in one sweep. A single
+    // `return` after the first hit meant a huge animal landed exactly one
+    // blow per tick while every small creature around it landed its own --
+    // predation was one-out, many-in, so being large was a liability rather
+    // than an advantage. A long body sweeping through a shoal should catch
+    // several of them at once.
+    let my_mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
+    let max_targets = (1.0 + my_mass / crate::SWEEP_MASS_PER_TARGET) as u32;
+    let mut victims: u32 = 0;
 
     for other in grid.nearby(my_pos) {
         let other = other as usize;
@@ -1405,6 +1421,37 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
             }
         }
         if let Some((j, _, power)) = hit {
+            // Gape-limited predation: if the prey is small enough relative to
+            // this body -- and a wider gape comes from having mouths -- it is
+            // swallowed whole instead of being chipped a part at a time. This
+            // is what "eating small things in one sweep" actually requires;
+            // chewing prey down pixel by pixel meant a large predator was
+            // occupied for many ticks by a creature it should simply have
+            // engulfed.
+            let prey_mass = body_size_sum(world, other) * world.individuals.size_scale[other];
+            // Mouths widen the gape, but only so far. Dividing by the raw
+            // bite multiplier (which reaches 3.5) dropped the required size
+            // advantage to 1.14, so near-equal creatures swallowed each
+            // other whole and nothing could ever accumulate size. A floor
+            // keeps engulfing a genuine big-eats-small act.
+            let gape = (crate::ENGULF_SIZE_RATIO / bite_multiplier(world, slot).max(0.001))
+                .max(crate::ENGULF_GAPE_MIN);
+            if my_mass >= prey_mass * gape {
+                let (ex, ey) = grid_xy(world, world.individuals.root_pos[other]);
+                let eidx = (ex * world.size + ey) as usize;
+                let meal = world.individuals.pixel_count[other] as f32
+                    * crate::CORPSE_ENERGY_PER_PIXEL
+                    * crate::ENGULF_EFFICIENCY
+                    * digestion_multiplier(world, slot);
+                world.individuals.energy[slot] += meal;
+                world.individuals.ticks_since_fed[slot] = 0;
+                world.fields.blood[eidx] += crate::BLOOD_EMIT_ON_DEATH;
+                world.fights += 1;
+                kill(world, other);
+                victims += 1;
+                if victims >= max_targets { return; }
+                continue;
+            }
             let hit_pos = other_pos[j];
             let (hx, hy) = grid_xy(world, hit_pos);
             let idx = (hx * world.size + hy) as usize;
@@ -1431,7 +1478,8 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
                 world.individuals.energy[slot] += bonus;
                 world.individuals.energy[other] -= bonus;
             }
-            return;
+            victims += 1;
+            if victims >= max_targets { return; }
         }
     }
 }
