@@ -128,7 +128,24 @@ pub const SYMMETRY_FOUNDER_CHANCE: f32 = 0.35;
 pub const SYMMETRY_FLIP_CHANCE: f32 = 0.06; // odds a node's symmetry trait flips when inherited
 /// How much a symmetric node prefers to grow laterally, where a mirrored twin
 /// is actually possible, over extending along the body axis where it is not.
-pub const SYMMETRY_LATERAL_WEIGHT: f32 = 3.0;
+pub const SYMMETRY_LATERAL_WEIGHT: f32 = 1.0;
+/// Weight of a plain interior growth site -- one that neither extends a tip
+/// nor places a bilateral pair. Low on purpose: interior sites outnumber tips
+/// by an order of magnitude in any large body, so at equal weight they drown
+/// out axial growth completely and every animal becomes a shrub.
+pub const INTERIOR_SITE_WEIGHT: f32 = 0.12;
+/// A little slack on the reach of a bite, so a mouth that is essentially in
+/// contact still connects rather than missing by a hair every tick.
+pub const BITE_REACH_SLACK: f32 = 0.6;
+/// How far a tentacle can reach to sweep smaller animals toward the mouth,
+/// how much smaller they must be to be worth gathering, and how hard the
+/// sweep pulls.
+pub const TENTACLE_REACH: f32 = 6.0;
+pub const TENTACLE_PREY_RATIO: f32 = 2.0;
+pub const TENTACLE_PULL: f32 = 2.5;
+/// Growth is discouraged at a node already carrying two children, so trunks
+/// stay trunks instead of fattening into slabs.
+pub const CROWDED_NODE_PENALTY: f32 = 0.3;
 // Upkeep multiplier applied to PER_PIXEL_METABOLISM, indexed by part kind
 // (body, eye, mouth, gut, tentacle, armor, flipper). Plain body is the
 // cheapest thing you can be made of.
@@ -309,9 +326,14 @@ pub const FOOD_SMELL_RANGE: i32 = 18;
 // How far a body can locate food WITHOUT eyes, and how much each eye extends
 // that. Smell alone gets you to food you are nearly on top of; sight is what
 // lets an animal cross open water toward a patch it can see.
-// Kleiber exponent: metabolic rate ~ mass^0.75, so per-part upkeep falls as
-// bodies get bigger. 1.0 would be the old (biologically wrong) linear cost.
-pub const METABOLIC_EXPONENT: f32 = 0.75;
+// Metabolic scaling exponent, applied to total body AREA. In two dimensions
+// the exchange boundary is a perimeter and the bulk is an area, so the
+// surface law gives an exponent near 0.5; 1.0 would be cost strictly
+// proportional to area, which measurement shows collapses worlds outright.
+pub const METABOLIC_EXPONENT: f32 = 0.6;
+/// Area of a typical plain body part, so charging upkeep on area rather than
+/// on a part count did not silently rescale the entire energy economy.
+pub const PART_AREA_REF: f32 = 0.49;
 // Measured: setting the blind range to 4 against a full range of 18 emptied
 // the world. The founding population has almost no eyes, so a hard gate
 // starves everything long before eyes can evolve -- a bootstrapping cliff, not
@@ -582,6 +604,17 @@ pub const BREEDING_SAFETY_BLOOD_MAX: f32 = 0.35;
 // Credited to an individual the moment it successfully reproduces, for
 // the experience log the future replay training will consume.
 pub const REWARD_REPRODUCE: f32 = 1.0;
+/// Keeping a full larder is worth a little every tick. Deliberately far below
+/// the reproduction reward: rewarding energy directly was previously measured
+/// making animals hoard rather than breed (mean energy tripled, births fell
+/// 73%), so this nudges toward reserves without making hoarding the goal.
+pub const REWARD_ENERGY_STOCK: f32 = 0.004;
+/// What a body can hold. Energy used to be unbounded -- an animal was
+/// observed sitting on 898 units of free, organ-less buffer. Capacity is now
+/// something built out of storage tissue and gut, weighted by part area.
+pub const ENERGY_CAP_BASE: f32 = 12.0;
+pub const ENERGY_CAP_PER_STORAGE: f32 = 14.0;
+pub const ENERGY_CAP_PER_GUT: f32 = 16.0;
 // How far a newborn's decoder is pulled toward the learned baseline policy.
 // Deliberately partial: at 1.0 every creature would start identical and the
 // variation selection needs would be gone, which would trade evolution away

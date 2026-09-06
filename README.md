@@ -560,8 +560,9 @@ brains performed no better than random ones.
   blocks breeding; reproduction credits a reward into the experience log.
 - **[x] Larger bodies should have longer gestation.** Gestation scales with offspring size.
 - **[~] Larger bodies must eat more.** Metabolism scales with parts and organ types; grazing
-  yield now falls with mass so large animals must hunt. Whether the scaling is *steep* enough
-  is unverified.
+  yield now falls with mass so large animals must hunt. The scaling is now *sublinear* (Kleiber),
+  which is the biologically correct shape and was the missing reason large bodies were never
+  viable -- see §7.
 - **[x] Big creatures should eat many small ones in one sweep.** A sweep budget scaling with
   body mass, plus gape-limited engulfing that swallows small prey whole.
 - **[x] Other individuals are food for emergent predators.** 92% of deaths are now predation.
@@ -580,9 +581,19 @@ brains performed no better than random ones.
 
 - **[x] More basic components.** Seven part types: body, eye, mouth, gut, tentacle, armor, flipper.
 - **[x] Bilateral symmetry as a property of a node.** Growing a component on a symmetric node
-  emits a mirrored twin at the reflected angle, with mirrored hinge limits.
+  emits a mirrored twin at the reflected angle, with mirrored hinge limits. The trait was
+  inherited but could not be *expressed*: only a lateral growth can pair, since a direction lying
+  on the body axis is its own mirror, yet tip extension runs along exactly that axis. So 35% of
+  founders carried the trait and only ~12% of bodies ever showed a pair. Symmetric nodes now grow
+  sideways by preference. Measured live: **32.9% of bodies carry a mirrored pair, 45.2% among
+  those with six or more parts.**
 - **[x] Bounding boxes should apply to all components.** Terrain collision uses each part's own
   radius rather than treating parts as dimensionless points.
+- **[~] Organs should be visually distinguishable, not just differently coloured.** Each organ kind
+  now has a characteristic girth -- a belly bulges, armour is a slab, an eye is a small lens, a
+  tentacle is thin -- and that girth drives collision footprint and hit radius as well as the drawn
+  radius, so what is on screen is what the physics uses. Applied to width only: one scalar cannot
+  express "long and thin", and folding it into segment length would make tentacles stubby.
 - **[ ] Creatures are essentially worms or very basic structures.** Topologically they are *not*
   worms (78% branch, ~1.2 branch points per body), but growth still weights "extend an existing
   tip in the same direction" at **8x** everything else, which biases hard toward elongation. That
@@ -641,6 +652,48 @@ brains performed no better than random ones.
 - **[ ] Bigger networks.** Still a 12-unit hidden layer.
 - **[?] Do creatures genuinely learn to swim?** Not demonstrated. See the motion physics section:
   until propulsion is reliably axis-locked, "learning to swim" cannot be claimed.
+
+### Feeding, collision and predation (raised while watching the live world)
+
+- **[x] "It is weird that they can only turn around their head."** Correct, and it was literally
+  that: fluid torque was taken about the root and forward kinematics rebuilt the body from the root
+  each tick, so every animal swung its whole mass around its nose. Torque is now taken about the
+  **centre of mass**, the root is carried around that point as the heading changes, and rotational
+  inertia is the real second moment rather than bare mass -- so a long body is genuinely sluggish
+  to turn and a compact one is nimble.
+- **[x] Eating requires a mouth to be touching the target, and the target part must be smaller
+  than the mouth.** Both now enforced. An animal with no mouth cannot eat another animal at all,
+  which is what finally makes a mouth worth its upkeep; a gape can only take a part smaller than
+  itself. Measured effect: mouths rose from 2.1% to 3.9% of all tissue, and 47.7% of animals carry
+  one.
+- **[x] Biting a non-leaf part slices the body, leaving dead matter.** The severed limb now falls
+  away as carrion at the point it was cut off, with real energy in it. Previously that flesh simply
+  vanished.
+- **[x] Armour cannot be cut.** A plated part turns a bite outright. It is not blanket
+  invulnerability -- blunt combat damage still goes through the normal armour arithmetic -- so
+  armour makes an animal tough rather than immortal.
+- **[x] A creature should be able to collect many small creatures and bring them to its mouth.**
+  Tentacles now sweep smaller animals toward the nearest mouth on the same body, with a reaction
+  force on the hauler, so gathering a crowd and working through it is possible and the placement of
+  tentacles relative to the mouth is worth evolving. Costs nothing for bodies lacking both organs.
+- **[x] Upkeep should scale with surface (in 2D).** Metabolism is charged on body **area** --
+  girth squared per part, weighted by tissue type -- rather than on a part count, so an animal
+  built from armour slabs is genuinely more expensive than one of the same part count built from
+  slender tentacles. See §7 for why the exponent on that area is not 1.0.
+- **[x] Less food, but more storable energy; energy stock is a reward.** Food regrowth cut to
+  0.009. Energy is now bounded by a storage capacity built from evolved storage tissue and gut,
+  weighted by part area -- it was previously unbounded, and an animal was observed sitting on 898
+  units of free organ-less buffer. A small per-tick reward tracks how full that larder is, kept far
+  below the reproduction reward because rewarding energy directly was previously measured making
+  animals hoard instead of breed.
+- **[ ] Use Jolt as the physics engine for realism.** Not taken, and worth stating why rather than
+  silently skipping: Jolt is a 3D rigid-body engine, while these animals are kinematic chains whose
+  motion is *generated* by an undulation wave passing down the body and resolved against fluid drag.
+  Handing that to a rigid-body solver would replace the exact mechanism that makes them swim, and
+  the thing actually being asked for -- collision between all components -- already exists and has
+  been extended: every part collides by its own girth against terrain, against other animals, and
+  now for feeding as well. If a real solver is ever wanted here, the candidate is `rapier2d` (native
+  Rust, genuinely 2D), not Jolt.
 
 ### Standing instructions
 

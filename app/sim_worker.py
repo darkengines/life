@@ -49,7 +49,11 @@ WORLD_SIZE = 240  # was 160 -- a real "bigger, more diverse world": 2.25x the ar
 # to survive it, the setting is a coin flip. Half the original rate keeps
 # foraging meaningful -- a grazed patch does deplete and travelling between
 # them matters -- without making extinction the default outcome.
-FOOD_REGROW_RATE = 0.015
+# Lowered again on the owner's instruction ("less food plz, but more storable
+# energy"). The two go together: scarcer food only produces interesting
+# behaviour if a body can bank a surplus and live off it, which is what the
+# new storage capacity provides. Scarcity without a larder is just starvation.
+FOOD_REGROW_RATE = 0.009
 FOOD_PATCHES = 50  # was 25
 POP_CAP = 6000  # was 4000
 FOUNDER_COUNT = 300  # was 160 -- a bigger world needs more founders to avoid the Allee effect -- the new,

@@ -154,17 +154,54 @@ pub fn pixel_velocities(world: &World, slot: usize, t: f32, eps: f32) -> Vec<[f3
     plus.iter().zip(minus.iter()).map(|(p, m)| [(p[0] - m[0]) / (2.0 * eps), (p[1] - m[1]) / (2.0 * eps)]).collect()
 }
 
-/// Net fluid force AND the torque it exerts about the body's root.
+/// Where a body's mass actually sits, and how hard it is to spin about that
+/// point. Parts are weighted by their evolved size, so a heavy armoured flank
+/// pulls the balance point toward itself exactly as it should.
+pub fn mass_center_and_moment(world: &World, slot: usize, pos: &[[f32; 2]]) -> ([f32; 2], f32) {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let mut m_total = 0f32;
+    let mut cx = 0f32;
+    let mut cy = 0f32;
+    for (k, p) in pos.iter().enumerate() {
+        let m = world.pixels.size[offset + k].max(0.01);
+        m_total += m;
+        cx += m * p[0];
+        cy += m * p[1];
+    }
+    if m_total <= 1e-8 || pos.is_empty() {
+        return (if pos.is_empty() { [0.0, 0.0] } else { pos[0] }, 1.0);
+    }
+    let com = [cx / m_total, cy / m_total];
+    // Second moment about that centre. This is the real reason a long animal
+    // is slow to turn and a compact one is nimble -- using bare mass, as
+    // before, made a 30-part body no harder to spin than a ball of the same
+    // weight, so shape had no consequence for manoeuvrability at all.
+    let mut moment = 0f32;
+    for (k, p) in pos.iter().enumerate() {
+        let m = world.pixels.size[offset + k].max(0.01);
+        let dx = p[0] - com[0];
+        let dy = p[1] - com[1];
+        moment += m * (dx * dx + dy * dy);
+    }
+    (com, moment)
+}
+
+/// Net fluid force AND the torque it exerts about the body's CENTRE OF MASS.
 ///
 /// Torque is what turns the animal. Returning only the force meant rotation
 /// had to come from somewhere else -- and it came from the brain assigning a
 /// heading directly, which is why pointing and moving were unrelated.
+///
+/// The pivot has to be the centre of mass, not the root. Taking moments about
+/// the head made every animal swing its entire body around its nose, which is
+/// not how anything unattached moves through water -- a free body rotates
+/// about its own balance point -- and it is immediately obvious on screen.
 pub fn fluid_thrust_torque(world: &World, slot: usize, pos: &[[f32; 2]], vel: &[[f32; 2]]) -> ([f32; 2], f32) {
     let offset = world.individuals.pixel_offset[slot] as usize;
     let count = pos.len();
     let mut force = [0f32; 2];
     let mut torque = 0f32;
-    let root = if count > 0 { pos[0] } else { [0.0, 0.0] };
+    let (pivot, _) = mass_center_and_moment(world, slot, pos);
     for k in 1..count {
         let parent = world.pixels.parent_idx[offset + k];
         if parent < 0 { continue; }
@@ -191,9 +228,9 @@ pub fn fluid_thrust_torque(world: &World, slot: usize, pos: &[[f32; 2]], vel: &[
         let fy = -(crate::DRAG_PARALLEL * vpary + perp * vperpy) * seg_len;
         force[0] += fx;
         force[1] += fy;
-        // r x F, about the root, for the 2D scalar torque.
-        let rx = pos[k][0] - root[0];
-        let ry = pos[k][1] - root[1];
+        // r x F, about the centre of mass, for the 2D scalar torque.
+        let rx = pos[k][0] - pivot[0];
+        let ry = pos[k][1] - pivot[1];
         torque += rx * fy - ry * fx;
     }
     (force, torque)
@@ -359,12 +396,24 @@ pub(crate) fn thrust_multiplier(world: &World, slot: usize) -> f32 {
 /// effective part count so the caller's existing per-pixel formula is
 /// unchanged in shape.
 pub(crate) fn metabolic_part_load(world: &World, slot: usize) -> f32 {
-    let counts = &world.individuals.part_counts[slot];
+    // Upkeep is charged on AREA, not on a part count. Two animals with the
+    // same number of parts are not equally expensive to run if one is built
+    // from slender tentacles and the other from armour slabs, and counting
+    // parts said they were. Every part now costs what it physically occupies
+    // -- girth squared, which in two dimensions is its area -- scaled by how
+    // expensive that kind of tissue is to keep alive. Normalised so a typical
+    // plain body part still costs about one unit, and so this did not
+    // silently rescale the whole energy economy.
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let count = world.individuals.pixel_count[slot] as usize;
     let mut load = 0.0;
-    for kind in 0..crate::pixels::PART_KIND_COUNT as usize {
-        load += counts[kind] as f32 * world.part_metabolism[kind];
+    for k in 0..count {
+        let g = crate::pixels::girth(&world.pixels, offset + k);
+        let kind = world.pixels.part_type[offset + k] as usize;
+        load += (g * g / crate::PART_AREA_REF) * world.part_metabolism[kind];
     }
-    // Kleiber's law. Upkeep used to be strictly linear in body size, which is
+    // Kleiber's law, in its two-dimensional form. Upkeep used to be strictly
+    // linear in body size, which is
     // both biologically wrong and, here, the quiet reason a worm always beats
     // an animal: a 16-part body paid 16x the running cost of a 1-part body
     // with nothing whatsoever offsetting it, so complexity was a pure tax and
@@ -372,7 +421,13 @@ pub(crate) fn metabolic_part_load(world: &World, slot: usize) -> f32 {
     // scales as roughly mass^(3/4) across twenty-seven orders of magnitude of
     // body mass (Kleiber 1932; West, Brown & Enquist 1997), which means large
     // animals enjoy a substantial per-gram energy DISCOUNT -- that discount is
-    // a large part of why being big is viable at all. The exponent is
+    // a large part of why being big is viable at all. The mechanism behind it
+    // is Rubner's surface law: an animal exchanges with the world across its
+    // BOUNDARY while its cost is carried by its bulk. In three dimensions
+    // that is surface over volume and gives 2/3; here the world is flat, so
+    // the boundary is a perimeter and the bulk is an area, perimeter grows as
+    // the square root of area, and the honest two-dimensional exponent is
+    // near 0.5. The exponent is
     // normalised at one part, so the smallest bodies are unaffected and this
     // only ever makes large bodies cheaper to run, never small ones dearer.
     load.max(1.0).powf(world.metabolic_exponent)
@@ -568,6 +623,143 @@ fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f
 /// Removes pixel `local_idx` and every descendant, re-indexing survivors --
 /// matches pixel_world.py's `remove_pixel`. Returns true if the individual
 /// should die (root removed, or nothing left).
+/// Tentacles sweep smaller animals toward the mouth.
+///
+/// Now that eating requires a mouth to be physically touching the prey, a
+/// large animal surrounded by small ones could still only eat whatever
+/// happened to drift into its jaws. Real suspension and tentacular feeders do
+/// not wait: they sweep prey inward. A tentacle that reaches a smaller animal
+/// drags it toward the nearest mouth on the same body, so a big animal can
+/// gather a crowd of small ones and work through them, and the placement of
+/// tentacles relative to the mouth becomes something worth evolving rather
+/// than decoration.
+///
+/// It costs nothing for the overwhelming majority of the population: a body
+/// needs both a tentacle and a mouth before any of this runs at all.
+fn tentacle_herding(world: &mut World, grid: &SpatialGrid) {
+    let slots: Vec<usize> = (0..world.individuals.alive.len())
+        .filter(|&s| {
+            world.individuals.alive[s]
+                && world.individuals.part_counts[s][crate::pixels::PART_TENTACLE as usize] > 0
+                && world.individuals.part_counts[s][crate::pixels::PART_MOUTH as usize] > 0
+        })
+        .collect();
+    if slots.is_empty() { return; }
+    let t = world.sim_time;
+    for slot in slots {
+        let off = world.individuals.pixel_offset[slot] as usize;
+        let count = world.individuals.pixel_count[slot] as usize;
+        let scale = world.individuals.size_scale[slot];
+        let my_pos = world_positions(world, slot, t);
+        if my_pos.len() < count { continue; }
+        let mouths: Vec<[f32; 2]> = (0..count)
+            .filter(|&k| world.pixels.part_type[off + k] == crate::pixels::PART_MOUTH)
+            .map(|k| my_pos[k])
+            .collect();
+        let tentacles: Vec<([f32; 2], f32)> = (0..count)
+            .filter(|&k| world.pixels.part_type[off + k] == crate::pixels::PART_TENTACLE)
+            .map(|k| (my_pos[k], crate::pixels::girth(&world.pixels, off + k) * scale))
+            .collect();
+        if mouths.is_empty() || tentacles.is_empty() { continue; }
+        let my_mass = body_size_sum(world, slot) * scale;
+
+        for other in grid.nearby_radius(world.individuals.root_pos[slot], crate::TENTACLE_REACH) {
+            let other = other as usize;
+            if other == slot || !world.individuals.alive[other] { continue; }
+            // Only something you could actually swallow is worth gathering.
+            let their_mass = body_size_sum(world, other) * world.individuals.size_scale[other];
+            if their_mass * crate::TENTACLE_PREY_RATIO > my_mass { continue; }
+            let their_root = world.individuals.root_pos[other];
+            // Is any tentacle actually on it?
+            let mut gripped = false;
+            for (tp, tg) in &tentacles {
+                let dx = their_root[0] - tp[0];
+                let dy = their_root[1] - tp[1];
+                let reach = crate::TENTACLE_REACH * tg.max(0.2);
+                if dx * dx + dy * dy < reach * reach { gripped = true; break; }
+            }
+            if !gripped { continue; }
+            // Drag it toward the nearest mouth.
+            let mut best = mouths[0];
+            let mut best_d2 = f32::MAX;
+            for m in &mouths {
+                let d2 = (m[0] - their_root[0]).powi(2) + (m[1] - their_root[1]).powi(2);
+                if d2 < best_d2 { best_d2 = d2; best = *m; }
+            }
+            let d = best_d2.sqrt();
+            if d < 1e-4 { continue; }
+            let pull = crate::TENTACLE_PULL * world.dt;
+            let ux = (best[0] - their_root[0]) / d;
+            let uy = (best[1] - their_root[1]) / d;
+            world.individuals.velocity[other][0] += ux * pull;
+            world.individuals.velocity[other][1] += uy * pull;
+            // Newton's third law: hauling prey in tugs the hauler back, in
+            // proportion to how outweighed it is, so a big animal barely
+            // feels it and a marginal one gets pulled about by its own catch.
+            let react = pull * (their_mass / my_mass.max(0.01)).min(1.0);
+            world.individuals.velocity[slot][0] -= ux * react;
+            world.individuals.velocity[slot][1] -= uy * react;
+        }
+    }
+}
+
+/// Which part of the prey does this predator actually get its jaws around?
+///
+/// Eating used to delete a uniformly random pixel of the victim, anywhere on
+/// its body, with no reference to where the attacker's mouth was or whether
+/// it had a mouth at all. That made a mouth decorative -- which is precisely
+/// why mouths were being selected against, sitting at 2.1% of all tissue
+/// against a ~5% random baseline. Three rules now decide it, and each one is
+/// a real anatomical constraint:
+///
+///   * There has to be a mouth, and it has to be TOUCHING the part. An animal
+///     with no mouth cannot eat another animal at all, so carrying one is
+///     worth its upkeep, and where it sits on the body matters.
+///   * The part has to fit in the mouth. A gape can only take something
+///     smaller than itself, which is the oldest size rule in predation and
+///     the reason big mouths are worth growing.
+///   * Armour cannot be cut. A plated part turns a bite, so armour buys real
+///     protection against being eaten -- though not against blunt combat
+///     damage, which still goes through the normal armour arithmetic, so a
+///     fully plated animal is tough rather than immortal.
+///
+/// Returns the local index of the part to bite off, or None if the predator
+/// cannot get a bite this tick.
+fn bite_target(world: &World, attacker: usize, prey: usize) -> Option<u32> {
+    let a_off = world.individuals.pixel_offset[attacker] as usize;
+    let a_count = world.individuals.pixel_count[attacker] as usize;
+    let p_off = world.individuals.pixel_offset[prey] as usize;
+    let p_count = world.individuals.pixel_count[prey] as usize;
+    if a_count == 0 || p_count == 0 { return None; }
+
+    let a_scale = world.individuals.size_scale[attacker];
+    let p_scale = world.individuals.size_scale[prey];
+    let a_pos = world_positions(world, attacker, world.sim_time);
+    let p_pos = world_positions(world, prey, world.sim_time);
+
+    let mut best: Option<(f32, u32)> = None;
+    for ak in 0..a_count.min(a_pos.len()) {
+        if world.pixels.part_type[a_off + ak] != crate::pixels::PART_MOUTH { continue; }
+        let gape = crate::pixels::girth(&world.pixels, a_off + ak) * a_scale;
+        for pk in 0..p_count.min(p_pos.len()) {
+            // Armour turns the bite outright.
+            if world.pixels.part_type[p_off + pk] == crate::pixels::PART_ARMOR { continue; }
+            let bit = crate::pixels::girth(&world.pixels, p_off + pk) * p_scale;
+            // It has to fit in the mouth.
+            if bit >= gape { continue; }
+            let dx = p_pos[pk][0] - a_pos[ak][0];
+            let dy = p_pos[pk][1] - a_pos[ak][1];
+            let d2 = dx * dx + dy * dy;
+            let reach = crate::COLLISION_RADIUS * 0.5 * (gape + bit) + crate::BITE_REACH_SLACK;
+            if d2 > reach * reach { continue; }
+            if best.map_or(true, |(bd, _)| d2 < bd) {
+                best = Some((d2, pk as u32));
+            }
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
 fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
     let offset = world.individuals.pixel_offset[slot];
     let count = world.individuals.pixel_count[slot];
@@ -587,6 +779,32 @@ fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
     let root_parent = world.pixels.parent_idx[offset as usize];
     if (local_idx == 0 && root_parent < 0) || to_remove.len() as u32 >= count {
         return true;
+    }
+
+    // Biting through a part that is NOT a leaf severs everything beyond it,
+    // and that flesh has to go somewhere. It used to simply vanish, so a
+    // predator biting an animal in half destroyed most of the body outright
+    // and nobody, including the predator, got to eat it. Now the severed
+    // limb falls away as carrion: real matter, at the place it was cut off,
+    // available to whatever finds it. The bitten part itself is not included
+    // -- that one is being eaten.
+    if to_remove.len() > 1 {
+        let positions = world_positions(world, slot, world.sim_time);
+        let severed: Vec<[f32; 2]> = to_remove
+            .iter()
+            .filter(|&&k| k != local_idx)
+            .filter_map(|&k| positions.get(k as usize).copied())
+            .collect();
+        if !severed.is_empty() {
+            let anchor = severed[0];
+            let local_shape = severed.iter().map(|p| [p[0] - anchor[0], p[1] - anchor[1]]).collect();
+            world.corpses.push(crate::Corpse {
+                root_pos: anchor,
+                local_shape,
+                color: world.individuals.color[slot],
+                energy: world.meal_energy_per_part * severed.len() as f32,
+            });
+        }
     }
 
     let mut old_to_new = vec![-1i32; count as usize];
@@ -660,6 +878,27 @@ fn storage_anchor_position(world: &World, slot: usize, root: [f32; 2]) -> [f32; 
     }
     let positions = world_positions_at(world, slot, world.sim_time, root);
     positions[best_idx]
+}
+
+/// How much energy this body can actually hold.
+///
+/// Built from the evolved per-part `storage` trait and from gut tissue, each
+/// weighted by the area of the part providing it, so storage is a thing an
+/// animal grows rather than a free universal buffer.
+pub(crate) fn storage_capacity(world: &World, slot: usize) -> f32 {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let count = world.individuals.pixel_count[slot] as usize;
+    let mut cap = crate::ENERGY_CAP_BASE;
+    for k in 0..count {
+        let g = crate::pixels::girth(&world.pixels, offset + k);
+        let area = g * g / crate::PART_AREA_REF;
+        let mut per = world.pixels.storage[offset + k] * crate::ENERGY_CAP_PER_STORAGE;
+        if world.pixels.part_type[offset + k] == crate::pixels::PART_GUT {
+            per += crate::ENERGY_CAP_PER_GUT;
+        }
+        cap += per * area;
+    }
+    cap * world.individuals.size_scale[slot]
 }
 
 fn kill(world: &mut World, slot: usize) {
@@ -951,8 +1190,8 @@ pub fn tick(world: &mut World) {
                 .clamp(0.0, crate::CAPTURE_CHEW_CHANCE_MAX);
             if world.rng.random::<f32>() < chew_chance {
                 let target_count = world.individuals.pixel_count[target];
-                if target_count > 0 {
-                    let victim = world.rng.random_range(0..target_count);
+                if let Some(victim) = bite_target(world, slot, target) {
+                    let _ = target_count;
                     let (hx, hy) = grid_xy(world, world.individuals.root_pos[target]);
                     let idx = (hx * world.size + hy) as usize;
                     let died = remove_pixel(world, target, victim);
@@ -968,6 +1207,10 @@ pub fn tick(world: &mut World) {
         }
     }
     timings.push(("attachment", t0.elapsed().as_secs_f64() * 1000.0));
+
+    let t0 = std::time::Instant::now();
+    tentacle_herding(world, &grid);
+    timings.push(("herding", t0.elapsed().as_secs_f64() * 1000.0));
 
     let attached_targets: std::collections::HashSet<usize> = alive_slots.iter()
         .filter_map(|&s| world.individuals.resolve_attached_target(s))
@@ -1013,7 +1256,7 @@ pub fn tick(world: &mut World) {
     // death) has real cross-individual mutation and stays sequential --
     // that's the actual reason this couldn't just be one big par_iter.
     let t0 = std::time::Instant::now();
-    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32)> = deciding
+    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32)> = deciding
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
@@ -1025,6 +1268,10 @@ pub fn tick(world: &mut World) {
                 (world_positions(world, slot, world.sim_time), pixel_velocities(world, slot, world.sim_time, 0.02))
             };
             let (thrust, torque) = fluid_thrust_torque(world, slot, &ind_pos, &ind_vel);
+            // Computed here, where the body's positions already exist, rather
+            // than rebuilding forward kinematics for it in the sequential
+            // phase.
+            let (com, moment) = mass_center_and_moment(world, slot, &ind_pos);
             let contact = contact_force(world, slot, &ind_pos, &grid, &pos_cache);
             // Deterministic sampling (no RNG call here -- this closure runs
             // in parallel and must stay a pure function of tick-start
@@ -1052,7 +1299,7 @@ pub fn tick(world: &mut World) {
             };
             // Raw density carried through rather than re-scanning
             // neighbors in the sequential phase where the drain is applied.
-            (d, thrust, contact, sample, conspecific_density, torque)
+            (d, thrust, contact, sample, conspecific_density, torque, com, moment)
         })
         .collect();
     timings.push(("decide_parallel", t0.elapsed().as_secs_f64() * 1000.0));
@@ -1076,9 +1323,10 @@ pub fn tick(world: &mut World) {
         // reproductions collapsed onto one row (observed reaching 28), which
         // is not a per-step reward at all and wrecked the training targets.
         world.individuals.pending_reward[slot] = 0.0;
-        let (d, thrust, contact, _, crowding, torque) = &pre[i];
+        let (d, thrust, contact, _, crowding, torque, com, moment) = &pre[i];
         let crowding = *crowding;
         let torque = *torque;
+        let (com, moment) = (*com, *moment);
         // Negative frequency-dependent selection (Red Queen / rare-type
         // advantage): a specialist pathogen tracks whichever host is
         // ABUNDANT, so the commonest lineage pays the highest price and
@@ -1137,15 +1385,34 @@ pub fn tick(world: &mut World) {
                 world.individuals.swim_gain[slot] = g;
             }
 
-            let inertia = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0)
+            // The real second moment about the balance point, so a long body
+            // is genuinely sluggish to turn and a compact one is nimble.
+            let inertia = (moment * world.individuals.size_scale[slot]).max(1.0)
                 * crate::ROTATIONAL_INERTIA;
             let ang_acc = torque / inertia
                 - world.angular_damping * world.individuals.angular_velocity[slot];
             world.individuals.angular_velocity[slot] =
                 (world.individuals.angular_velocity[slot] + ang_acc * world.dt)
                     .clamp(-crate::MAX_ANGULAR_SPEED, crate::MAX_ANGULAR_SPEED);
-            world.individuals.heading[slot] +=
-                world.individuals.angular_velocity[slot] * world.dt;
+            let dtheta = world.individuals.angular_velocity[slot] * world.dt;
+            world.individuals.heading[slot] += dtheta;
+            // Every part's position is rebuilt each tick by forward kinematics
+            // from the root and the heading, so turning the heading alone
+            // sweeps the whole body around the ROOT -- the animal pivots on
+            // its nose. Carrying the root around the centre of mass by the
+            // same angle leaves the balance point where it was and makes the
+            // body turn about its middle, which is what a free body in water
+            // actually does. The client rebuilds positions from root and
+            // heading the same way, so it follows without any change there.
+            if dtheta.abs() > 1e-9 {
+                let (sin_d, cos_d) = dtheta.sin_cos();
+                let rx = world.individuals.root_pos[slot][0] - com[0];
+                let ry = world.individuals.root_pos[slot][1] - com[1];
+                world.individuals.root_pos[slot] = [
+                    com[0] + rx * cos_d - ry * sin_d,
+                    com[1] + rx * sin_d + ry * cos_d,
+                ];
+            }
 
             let mass = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0);
 
@@ -1329,6 +1596,35 @@ pub fn tick(world: &mut World) {
                 // would quietly stop mattering.
                 + crate::DISEASE_RESISTANCE_METABOLIC_COST * world.individuals.disease_resistance[slot];
             world.individuals.energy[slot] -= metabolism * world.metabolism_multiplier;
+
+            // Energy is now BOUNDED by what the body can actually hold.
+            // Before this an animal simply accumulated without limit -- one
+            // was observed sitting on 898 units, an enormous buffer against
+            // every hazard in the world that cost nothing to carry and was
+            // not attached to any organ. A real store has to be built and
+            // fed. Capacity comes from the evolved per-part `storage` trait
+            // and from gut tissue specifically, weighted by the area of the
+            // part doing the storing, so a deep-bellied animal can bank a
+            // long fast and a slender one lives hand to mouth. With food
+            // scarce, that buffer is what carries a body between meals, which
+            // is what makes storage worth its upkeep.
+            let cap = storage_capacity(world, slot);
+            if world.individuals.energy[slot] > cap {
+                world.individuals.energy[slot] = cap;
+            }
+
+            // A full larder is worth something in itself. Kept deliberately
+            // small relative to the reproduction reward: an earlier attempt
+            // to reward energy directly was measured making animals hoard
+            // instead of breed -- mean energy tripled while births fell 73%
+            // -- so this is a nudge toward keeping reserves, not a reason to
+            // stop living. It is scored as a FRACTION of capacity so it
+            // rewards being well-fed for your build rather than simply being
+            // large.
+            if cap > 0.0 {
+                world.individuals.pending_reward[slot] +=
+                    crate::REWARD_ENERGY_STOCK * (world.individuals.energy[slot] / cap).clamp(0.0, 1.0);
+            }
 
             // Crowding costs. Bodies were piling on top of one another with no
             // penalty at all, so a creature could sit in a heap, breed, and do

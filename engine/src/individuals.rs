@@ -653,9 +653,36 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
             // the axis where pairing is impossible by construction. So
             // symmetric nodes were being handed a trait they could not
             // express.
-            let mut w = if extends_tip { tip_weight } else { 1.0 };
-            if pixels.symmetric[offset as usize + k] && d.1 != 0 {
-                w *= crate::SYMMETRY_LATERAL_WEIGHT;
+            // Interior sites are deliberately cheap, and this is what
+            // decides whether an animal has a body plan or is a shrub.
+            // Every part offers a free neighbouring cell, so the number of
+            // interior sites grows with the body while the number of tips
+            // stays at two: a twenty-part body presented about thirty
+            // interior candidates at weight 1.0 against two tips at weight
+            // 2.0, so barely a tenth of all growth extended the animal and
+            // the rest packed on sideways. Measured on the live world, the
+            // longest chain through a body was only 0.4 of its part count
+            // and 37% of nodes carried more than one child -- a radial bush,
+            // which is why they looked ineffective and why turning did
+            // nothing useful. Weighting tips over interior sites gives a
+            // trunk that elongates, with paired appendages branching off it
+            // at symmetric nodes: a bilaterian, rather than a lichen.
+            let lateral_pair = pixels.symmetric[offset as usize + k] && d.1 != 0;
+            let mut w = if extends_tip {
+                tip_weight
+            } else if lateral_pair {
+                crate::SYMMETRY_LATERAL_WEIGHT
+            } else {
+                crate::INTERIOR_SITE_WEIGHT
+            };
+            // A node that already carries children is a poor place for yet
+            // another one; without this, thick trunks fatten into slabs.
+            let existing_children = pixels.parent_idx[offset as usize..(offset + count) as usize]
+                .iter()
+                .filter(|&&pp| pp == k as i32)
+                .count();
+            if existing_children >= 2 {
+                w *= crate::CROWDED_NODE_PENALTY;
             }
             candidates.push((k, d));
             weights.push(w);
