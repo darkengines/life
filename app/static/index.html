@@ -754,8 +754,9 @@ function fkPositions(ind, simTime, rootPos, heading) {
   for (let k = 0; k < n; k++) {
     // Mirrored twins beat in mirror image; must match the engine.
     const ms = (ind.mirror_sign && ind.mirror_sign[k] !== undefined) ? ind.mirror_sign[k] : 1;
+    // Posture is applied outside the oscillation clamp; must match the engine.
     const wave = ms * flex[k] * amp * Math.sin(2 * Math.PI * freq * simTime + phase + depth[k] * 0.7)
-      + (ind.turn_curvature || 0) * flex[k];
+      + Math.max(-0.9, Math.min(0.9, (ind.turn_curvature || 0) * flex[k]));
     const parent = ind.parents[k];
     const segLen = sizeScale * (partSize[k] !== undefined ? partSize[k] : 1.0);
     if (parent < 0) {

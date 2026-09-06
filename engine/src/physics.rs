@@ -95,8 +95,7 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // torque that turns it -- the animal steers by SHAPING ITSELF, not by
         // having its orientation overwritten.
         let raw_wave = world.pixels.mirror_sign[offset + k] * flex * amp
-            * (std::f32::consts::TAU * freq * t + phase + depth[k] * crate::BODY_WAVE_NUMBER).sin()
-            + world.individuals.turn_curvature[slot] * flex;
+            * (std::f32::consts::TAU * freq * t + phase + depth[k] * crate::BODY_WAVE_NUMBER).sin();
         // Joint angle limits: a real hinge constraint on how far THIS
         // joint's animated bend can deviate from its rest pose, heritable
         // per part (pixels.rs's min_angle/max_angle). Previously every
@@ -105,7 +104,19 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // identically except for amplitude. A narrow range reads as a
         // rigid/braced joint, a wide one as a loose/flexible one, and nothing
         // here decides which is good; it's just now possible to evolve.
-        let wave = raw_wave.clamp(world.pixels.min_angle[offset + k], world.pixels.max_angle[offset + k]);
+        // The joint limit bounds how far this joint may OSCILLATE about its
+        // rest pose. Deliberate steering was previously added before that
+        // clamp, so a hard turn was simply clipped away: measured, turn rate
+        // saturated at a curvature of ~0.5 and every larger command produced
+        // exactly the same rotation. The brain had no authority beyond a
+        // slight bend, while the body's own asymmetry span it faster than it
+        // could correct. Posture is applied outside the oscillation clamp and
+        // bounded separately, so a creature can genuinely throw its body into
+        // a turn.
+        let oscillation = raw_wave.clamp(world.pixels.min_angle[offset + k], world.pixels.max_angle[offset + k]);
+        let posture = (world.individuals.turn_curvature[slot] * flex)
+            .clamp(-crate::MAX_POSTURE_BEND, crate::MAX_POSTURE_BEND);
+        let wave = oscillation + posture;
         let parent = world.pixels.parent_idx[offset + k];
         // A part's own evolved `size` stretches ITS segment specifically
         // (on top of the individual-wide size_scale inflation) -- a body
@@ -1058,7 +1069,7 @@ pub fn tick(world: &mut World) {
             let inertia = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0)
                 * crate::ROTATIONAL_INERTIA;
             let ang_acc = torque / inertia
-                - crate::ANGULAR_DAMPING * world.individuals.angular_velocity[slot];
+                - world.angular_damping * world.individuals.angular_velocity[slot];
             world.individuals.angular_velocity[slot] =
                 (world.individuals.angular_velocity[slot] + ang_acc * world.dt)
                     .clamp(-crate::MAX_ANGULAR_SPEED, crate::MAX_ANGULAR_SPEED);

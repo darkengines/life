@@ -543,6 +543,10 @@ pub const SWIM_GAIN_MAX: f32 = 1.9;
 // wavelength of the travelling wave running down the body.
 pub const BODY_WAVE_NUMBER: f32 = 0.7;
 pub const TURN_CURVATURE_SCALE: f32 = 0.9;
+// How far a joint may be held bent as a deliberate postural command, on top
+// of whatever it is oscillating through. Bounded so a body cannot fold itself
+// into a knot, but generous enough that steering actually has authority.
+pub const MAX_POSTURE_BEND: f32 = 0.9;
 pub const TURN_POSTURE_BIAS_SCALE: f32 = 0.35;
 pub const ROTATIONAL_INERTIA: f32 = 2.5;
 pub const ANGULAR_DAMPING: f32 = 2.0;
@@ -661,6 +665,9 @@ pub struct World {
     /// IDENTICAL body produced thrust varying from 0 to 13.7 across
     /// headings, which looks like broken physics but is just behaviour.
     pub freeze_locomotion: Option<(f32, f32)>,
+    /// Runtime-overridable ANGULAR_DAMPING, so the balance between
+    /// intentional turning and involuntary self-spin can be swept.
+    pub angular_damping: f32,
     /// Runtime-overridable GRAVITY, so locomotion can be probed in
     /// isolation without sinking confounding the measurement.
     pub gravity: f32,
@@ -737,6 +744,7 @@ impl World {
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
+            angular_damping: ANGULAR_DAMPING,
             gravity: GRAVITY,
             shared_enc_w,
             shared_enc_b,
@@ -1199,6 +1207,9 @@ impl World {
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
     }
+
+    /// Test-only: overrides angular damping.
+    fn debug_set_angular_damping(&mut self, v: f32) { self.angular_damping = v; }
 
     /// Test-only: forces every part of a body to be symmetric (or not), so a
     /// bilateral and a lopsided body plan can be compared directly.
