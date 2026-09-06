@@ -616,7 +616,36 @@ fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f
         out[31] = (sample(pos[0] + r, pos[1]) - sample(pos[0] - r, pos[1])).clamp(-1.0, 1.0);
         out[32] = (sample(pos[0], pos[1] + r) - sample(pos[0], pos[1] - r)).clamp(-1.0, 1.0);
     }
-    out[33..33 + MEM_DIM].copy_from_slice(&mem);
+    // PROPRIOCEPTION: which way this body is actually travelling, expressed
+    // in its OWN frame, and how fast.
+    //
+    // Measured, this is the missing piece behind "they swim with the tail
+    // frontward". For any single body, thrust is perfectly locked to its
+    // shape -- consistency R=1.000 across every heading. But ACROSS bodies
+    // the direction it pushes relative to its nominal heading scatters
+    // completely (R=0.259 over fifteen body plans, with several pushing at
+    // 160-170 degrees, i.e. genuinely backwards). So "heading" is simply not
+    // the direction an animal swims, and which way a given body goes is a
+    // property of the body it happened to grow.
+    //
+    // The animal had no channel telling it any of this. It could not perceive
+    // that it was swimming backwards, so no brain, of any size, however
+    // trained, could have learned to correct it -- the feedback was not
+    // there. This is deliberately NOT fixed by rotating thrust to match
+    // heading, which would hand the animal a correct body for free; motion
+    // should stay a consequence of how the body moves, and the animal should
+    // have to learn to use the one it has. What it gets is the sense needed
+    // to make that learnable.
+    let vel = world.individuals.velocity[slot];
+    let speed = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
+    if speed > 1e-5 {
+        let (sin_h, cos_h) = world.individuals.heading[slot].sin_cos();
+        // Rotate velocity into the body frame: +x is where the animal points.
+        out[33] = (vel[0] * cos_h + vel[1] * sin_h) / speed;
+        out[34] = (-vel[0] * sin_h + vel[1] * cos_h) / speed;
+    }
+    out[35] = (speed / crate::MAX_SPEED).clamp(0.0, 1.0) * 2.0 - 1.0;
+    out[36..36 + MEM_DIM].copy_from_slice(&mem);
     (out, conspecific_density)
 }
 

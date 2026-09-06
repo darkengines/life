@@ -371,6 +371,39 @@ count. The rewrite checked only that the index was inside the cache, which does 
 that shrank, and read past the end of the arena. A cache that is one phase stale is not the same as
 a cache that is merely indexed safely.
 
+**"They swim with the tail frontward" -- finally diagnosed, and it was never a brain problem.**
+Two measurements together settle this. With the brain frozen out and the body pinned in place, the
+mean thrust direction of a single body is *perfectly* locked to that body: identical to five decimal
+places across all twelve headings tested, consistency **R = 1.000**. So propulsion is not noisy, and
+turning the animal turns its thrust vector exactly as it should. (This is a real improvement --
+before rotation was moved to the centre of mass, alignment sat near 81 degrees, i.e. statistically
+random.)
+
+But across *different* bodies, the angle between where a body points and where it actually pushes
+scatters completely:
+
+| bodies tested | mean offset | consistency |
+|---|---|---|
+| 15 body plans, 7-20 parts | +141.9 deg | **R = 0.259** |
+
+Individual offsets run +25, +19.6, -10.7, -18.8, -162.1, -103, +154, +166.9, +160.5, -168.7, -171.4,
++113.6, +24.7, +137.8, +129.7 degrees. Several bodies push at 160-170 degrees from their nominal
+heading -- genuinely, precisely backwards. So `heading` is simply **not** the direction an animal
+swims, and which way any given body goes is a property of the body it happened to grow. The
+centroid-derived anterior axis does not capture it.
+
+The decisive part is what came next. The sense vector contained **no self-motion channel at all** --
+no velocity, no drift, nothing relating where the animal points to where it is going. An animal
+swimming backwards had no way to perceive that it was. This was never a matter of network capacity
+or training: no brain of any size could learn to correct a fault it cannot observe, because the
+feedback did not exist.
+
+Fixed by adding proprioception -- the animal's own velocity expressed in its own body frame, plus
+speed -- and deliberately **not** by rotating thrust to match heading. Correcting the physics would
+hand every animal a working body for free; the standing requirement is that motion stays a
+consequence of how the body moves and the animal has to learn to use the one it grew. What it gets
+is the sense that makes that learnable.
+
 ---
 
 ## 8. Roadmap / wishlist
@@ -671,7 +704,12 @@ brains performed no better than random ones.
 - **[x] Bodies need a real anterior axis.** `heading` merely rotated whatever shape a creature
   grew into, so the offset between "pointing" and "moving" differed per individual and pooled to
   look like noise. Each body now has an axis from root to centre of mass.
-- **[~] "They swim with the tail frontward."** The measured reality was worse than tail-first: the
+- **[x] "They swim with the tail frontward."** Diagnosed and addressed -- see §7. Thrust is
+  perfectly locked to a given body (R=1.000 across headings), but the offset between pointing and
+  pushing varies wildly between bodies (R=0.259 over fifteen plans, several pushing almost exactly
+  backwards), and animals had no sense channel with which to notice. Proprioception added; the
+  physics deliberately left alone.
+- **[~] Superseded note on the same problem:** The measured reality was worse than tail-first: the
   angle between heading and actual movement averaged ~91°, i.e. **statistically random**.
   Torque-driven turning plus the anterior axis improved the fastest swimmers to ~58°, but with
   thermal noise removed entirely alignment still sits near 81°. **Propulsion is still not

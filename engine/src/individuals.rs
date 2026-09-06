@@ -16,14 +16,24 @@ pub const MEM_DIM: usize = 4;
 //  threat_dx, threat_dy, threat_proximity, prey_dx, prey_dy, prey_proximity,
 //  mate_dx, mate_dy, mate_proximity, day_light,
 //  home_dx, home_dy, local_territory_mark, conspecific_density,
-//  shelter_here, shelter_dx, shelter_dy, *root_memory]
+//  shelter_here, shelter_dx, shelter_dy,
+//  drift_forward, drift_lateral, speed_norm, *root_memory]
+//
+// The three proprioceptive channels are what make "learning to swim"
+// possible at all. Thrust is perfectly locked to a given body (R=1.000 across
+// headings) but the direction a body pushes relative to where it points
+// varies completely from body to body (R=0.259 across fifteen plans, several
+// of them pushing almost exactly backwards). An animal had no way to sense
+// that, so swimming tail-first was not a behaviour it could learn out of --
+// the feedback did not exist. Reporting its own velocity in its own frame
+// leaves the physics alone and makes the problem observable.
 //
 // The shelter channels close a real gap: creatures could not perceive terrain
 // at all, discovering rock only by colliding with it. Sheltering measurably
 // pays -- small bodies survive 42% inside the deep reef against 20% for large
 // ones -- but nothing could navigate toward it, so that payoff was
 // unreachable and could never select for anything.
-pub const SENSE_DIM: usize = 33 + MEM_DIM;
+pub const SENSE_DIM: usize = 36 + MEM_DIM;
 pub const HIDDEN_DIM: usize = 12;
 /// Width of the shared perception latent. Every individual's raw senses are
 /// compressed through ONE encoder shared by the whole world, and each
