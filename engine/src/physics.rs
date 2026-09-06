@@ -192,7 +192,20 @@ fn part_bonus(world: &World, slot: usize, kind: u8, per_part: f32, cap: f32) -> 
     (1.0 + per_part * n).min(cap)
 }
 
+/// Sight range, or 0 for a body with no eyes at all.
+///
+/// Vision used to be a free universal sense that every creature had in full,
+/// with eyes merely extending it -- so nothing was ever selected FOR having
+/// eyes, and every animal was equally aware of the world regardless of its
+/// anatomy. Senses are supplied by organs now: no eye, no visual input. The
+/// brain always has the same input slots, but a slot only carries signal if
+/// the body has the component that feeds it, which is what makes sensory
+/// anatomy a real evolutionary decision rather than decoration.
 pub(crate) fn vision_range_of(world: &World, slot: usize) -> f32 {
+    let eyes = world.individuals.part_counts[slot][crate::pixels::PART_EYE as usize];
+    if eyes == 0 {
+        return 0.0;
+    }
     crate::VISION_RANGE
         * part_bonus(world, slot, crate::pixels::PART_EYE, crate::EYE_VISION_BONUS, crate::EYE_VISION_MAX)
 }
@@ -283,6 +296,9 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
     // its own skin, while one that invested in eyes sees far enough to
     // actually hunt or flee rather than blunder into things.
     let range = vision_range_of(world, slot);
+    if range <= 0.0 {
+        return [0f32; 9]; // blind: the visual input slots stay dead
+    }
     let my_size = body_size_sum(world, slot) * world.individuals.size_scale[slot];
     let my_female = world.individuals.female[slot];
     let mut best_threat: Option<(f32, [f32; 2])> = None;
@@ -535,7 +551,16 @@ fn update_weather(world: &mut World) {
 fn has_nearby_mate(world: &World, slot: usize, grid: &SpatialGrid) -> bool {
     let pos = world.individuals.root_pos[slot];
     let my_female = world.individuals.female[slot];
-    for other in grid.nearby(pos) {
+    // MUST be nearby_radius, not nearby: the latter only ever searches one
+    // cell in each direction (~4 units), so the `dist < MATE_RADIUS` test
+    // below could never actually bind and the effective mate-search radius
+    // was about a fifth of the intended 20 -- a twenty-fivefold shortfall in
+    // search AREA. This is the identical bug that was found and fixed in
+    // vision earlier; has_nearby_mate was simply never updated with it. It
+    // made mates far scarcer than designed, which is a large part of why
+    // thinned-out populations slid into the Allee trap and went extinct
+    // instead of recovering.
+    for other in grid.nearby_radius(pos, crate::MATE_RADIUS) {
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
         if world.individuals.female[other] == my_female { continue; }
@@ -1095,7 +1120,7 @@ pub fn tick(world: &mut World) {
             // budget instead of slamming into an artificial cap.
             let offspring_parts = world.individuals.pixel_count[slot] as f32 + 1.0;
             let repro_cost = crate::REPRODUCE_BASE_COST
-                + crate::REPRODUCE_COST_PER_PART * offspring_parts;
+                + world.repro_cost_per_part * offspring_parts;
             // Must keep a survival buffer after paying, or reproducing would
             // be a reliable way to starve immediately afterwards.
             let repro_threshold = repro_cost + crate::REPRODUCE_ENERGY_BUFFER;

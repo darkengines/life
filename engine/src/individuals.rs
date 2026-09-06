@@ -285,7 +285,7 @@ impl Individuals {
         &self.brain_b2[s..s + ACT_DIM]
     }
 
-    fn randomize_brain(&mut self, slot: usize, rng: &mut Pcg64) {
+    pub fn randomize_brain(&mut self, slot: usize, rng: &mut Pcg64) {
         for v in self.brain_w1_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.6); }
         for v in self.brain_b1_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.1); }
         for v in self.brain_w2_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.6); }

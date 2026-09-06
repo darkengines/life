@@ -538,6 +538,10 @@ pub struct World {
     // can't be compared against itself in one run). Production never
     // changes it.
     pub pathogen_damage_rate: f32,
+    // Runtime-overridable copy of REPRODUCE_COST_PER_PART, for the same
+    // reason as pathogen_damage_rate: sweeping a compile-time constant
+    // against a fixed seed is impossible in a single run.
+    pub repro_cost_per_part: f32,
 }
 
 #[pymethods]
@@ -576,6 +580,7 @@ impl World {
             timings: Vec::new(),
             experience_log: Vec::new(),
             pathogen_damage_rate: PATHOGEN_DAMAGE_RATE,
+            repro_cost_per_part: REPRODUCE_COST_PER_PART,
         }
     }
 
@@ -968,6 +973,25 @@ impl World {
     fn debug_conspecific_densities<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
         let vals = physics::conspecific_densities(self);
         PyArray1::from_vec(py, vals)
+    }
+
+    /// Test-only: wipes every living individual's learned weights back to
+    /// random. Used to measure whether evolved behaviour actually beats
+    /// random behaviour -- the control condition for "is intelligence
+    /// contributing anything at all".
+    fn debug_randomize_all_brains(&mut self) {
+        for slot in 0..self.individuals.alive.len() {
+            if self.individuals.alive[slot] {
+                let mut rng = std::mem::replace(&mut self.rng, Pcg64::seed_from_u64(0));
+                self.individuals.randomize_brain(slot, &mut rng);
+                self.rng = rng;
+            }
+        }
+    }
+
+    /// Test-only: overrides the per-part reproduction cost for a sweep.
+    fn debug_set_repro_cost_per_part(&mut self, v: f32) {
+        self.repro_cost_per_part = v;
     }
 
     /// Test-only: overrides the pathogen damage rate for an A/B run.

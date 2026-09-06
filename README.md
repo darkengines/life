@@ -282,6 +282,29 @@ This is a genuine diversity-versus-population trade-off, not a single correct va
 Status key: **[ ]** not started · **[~]** partially done · **[?]** needs investigation
 
 ### Intelligence (the largest open area)
+
+**Measured starting point:** evolved brains are *no better than random ones* at steering toward
+food (forage alignment −0.012 evolved vs +0.000 random). Evolution is improving bodies — evolved
+populations live longer and hold more energy — but the brains contribute almost nothing to
+navigation. Two causes are visible in the logged sense vectors: the four recurrent memory channels
+carry the highest variance of all 34 inputs (std 0.76, saturated at ±1), so the network mostly
+listens to its own feedback; and with food abundant everywhere and 6.6 fights per birth, foraging
+skill barely affects survival, so there is little pressure to be smart. **A sparser, size-structured
+world with refuges is therefore a prerequisite for intelligence mattering at all** — the ecology
+work below is not a separate track from this one.
+
+- **[~] Composable brain: a sensory component supplies a brain input.** First instance implemented —
+  vision is now organ-gated, so a body with no eyes gets zeroed visual inputs instead of free
+  universal sight. The brain keeps a fixed set of input slots, but a slot only carries signal if the
+  body has the organ feeding it, which makes sensory anatomy an evolutionary decision. Still to do:
+  extend this to the other senses (chemoreception, light, pressure/flow) as their own organs, so the
+  full sensorium is assembled from parts rather than granted.
+- **[ ] Asynchronous brain evaluation.** Network cost is already a real per-tick expense and will
+  grow as networks get bigger; it must not sit on the critical path of the simulation loop. The
+  intended shape is the same decoupling used elsewhere here: the simulation keeps stepping while
+  inference/training happen off the tick loop.
+- **[ ] Reconsider the recurrent memory channels.** They dominate the input vector and saturate;
+  they may be actively drowning out sensory input rather than providing useful state.
 - **[~] Shared brain trained asynchronously on the GPU.** The requested architecture: a larger common
   network trained by experience replay on an RTX 6000 while the simulation keeps running at full
   speed, with improved weights synced back in.
@@ -314,6 +337,37 @@ Status key: **[ ]** not started · **[~]** partially done · **[?]** needs inves
 - **[ ] Save / load a world**, so an interesting run can be kept or shared.
 - **[ ] Draw terrain / place obstacles** interactively.
 
+### Size-structured ecology (the current design direction)
+
+The world currently reaches a high population of uniformly large creatures stacked on top of one
+another, which is both visually illegible and ecologically wrong. The target instead is a
+**size-structured community**: fewer, larger animals that are genuinely expensive to be, alongside
+small ones persisting in places the large ones cannot reach. Each piece below has a real model
+behind it in the bibliography (§C predator–prey coevolution, §D niche construction, §B behavioural
+ecology).
+
+- **[ ] Large creatures should eat small ones fast, making life rarer.** Partly in (consumption now
+  scales with size mismatch), but the population still saturates. Predation should be the main
+  regulator of abundance, not an artificial cap.
+- **[ ] Gestation should scale with offspring size.** Reproduction is now *priced* by body size, but
+  it is still instantaneous. A large animal should also be slow to reproduce — a real gestation
+  delay, which is what separates an r-strategist from a K-strategist and is the standard mechanism
+  for size-structured population regulation.
+- **[ ] Larger bodies must eat proportionally more.** Metabolism already scales with parts and organ
+  types; whether it scales *steeply enough* to make being huge a genuine commitment is unmeasured.
+- **[ ] Spatial refugia — the key missing mechanism.** Small creatures should survive in caves,
+  crevices and quiet zones that large bodies physically cannot enter. Collision is already per-pixel
+  against terrain, so a large body genuinely cannot fit through a narrow gap — meaning refugia may
+  work *already* if the terrain generator produced fine structure (pockets, crevices, tunnels). It
+  currently produces only open water, a sand floor and rock masses. This is the single highest-value
+  item here: size-selective refuge is the textbook mechanism allowing predator and prey to coexist
+  instead of the predator eating everything, and it produces habitat specialisation for free.
+- **[ ] Crowding should be uncomfortable.** Bodies currently overlap freely; creatures stack. Real
+  contact forces exist but are evidently too weak to keep bodies apart at high density.
+- **[ ] Let specialisation emerge from the above** rather than being scripted: a cave-dwelling small
+  grazer and an open-water hunter should be two strategies the same engine produces, not two coded
+  creature types.
+
 ### Ecology and mechanics
 - **[~] Diversity vs. competitive exclusion.** Red Queen pressure is in and calibrated, but the
   diversity/population trade-off is unresolved (§7). Worth exploring whether dispersal, resource
@@ -327,9 +381,18 @@ Status key: **[ ]** not started · **[~]** partially done · **[?]** needs inves
   trap making, food caching and shelter construction fall out of the same primitive instead of each
   needing its own bespoke system — which is exactly the shape of open-ended complexity this project
   is after. See bibliography §D.
-- **[ ] Emergent organs.** The evolved `storage` trait (a de-facto belly/mouth anchor) hints at what
-  is possible. Making functional organs *emerge* rather than hardcoding "stomach = X" is the most
-  promising direction in the bibliography (§A, Moreno et al.).
+- **[ ] Bilateral symmetry as a heritable property of a node.** A part carries a symmetry flag; when
+  a new component grows on such a node, a mirrored counterpart appears on the same node at the
+  reflected angle. This is one of the genuine major body-plan innovations in animal evolution
+  (bilateria), and mechanically it is small: `grow_one_pixel` emits a pair instead of a single part
+  when the parent node is symmetric. The payoff is large — paired eyes, paired flippers, paired
+  tentacles instead of organs scattered at random angles, which is most of what makes a shape read
+  as an *animal* rather than a lump. It also makes symmetry itself evolvable: it should win where
+  balanced propulsion or stereo sensing pays, and lose where it just doubles the upkeep.
+- **[x] Emergent organs** (first pass). Parts differentiate into eye / mouth / gut / tentacle /
+  armor / flipper, each with a real function and upkeep, and selection demonstrably acts on the mix.
+  Still open: organs that *compose* into higher-order structures, per bibliography §A (Moreno et al.)
+  — the current version gives division of labour but not yet anatomy with topology.
 - **[ ] Richer weather / seasons / geological change.** Only three weather events exist; a genuinely
   *dynamic* world was requested repeatedly.
 - **[ ] Predator/prey coevolutionary cycles** — bibliography §2 and §9 describe long-period cycles
