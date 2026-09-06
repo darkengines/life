@@ -17,6 +17,35 @@ fn normal(rng: &mut rand_pcg::Pcg64, mean: f32, std: f32) -> f32 {
     Normal::new(mean, std).unwrap().sample(rng)
 }
 
+/// The world is a torus: its edges are joined, so the shortest path between
+/// two points may run off one side and back in the other. Every distance and
+/// every direction has to use that shortest path (the minimum image
+/// convention), or the seam becomes a wall that nothing can sense across --
+/// which is precisely the boundary artefact wrapping is meant to remove.
+#[inline]
+pub(crate) fn wrap_delta(d: f32, size: f32) -> f32 {
+    let half = size * 0.5;
+    if d > half {
+        d - size
+    } else if d < -half {
+        d + size
+    } else {
+        d
+    }
+}
+
+#[inline]
+pub(crate) fn wrap_pos(v: f32, size: f32) -> f32 {
+    let m = v % size;
+    if m < 0.0 { m + size } else { m }
+}
+
+fn dist_wrapped(a: [f32; 2], b: [f32; 2], size: f32) -> f32 {
+    let dx = wrap_delta(a[0] - b[0], size);
+    let dy = wrap_delta(a[1] - b[1], size);
+    (dx * dx + dy * dy).sqrt()
+}
+
 fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
@@ -304,9 +333,14 @@ fn resting_on_solid_ground(world: &World, pos: [f32; 2]) -> bool {
 }
 
 pub(crate) fn grid_xy(world: &World, pos: [f32; 2]) -> (u32, u32) {
-    let x = pos[0].clamp(0.0, world.size as f32 - 1.0) as u32;
-    let y = pos[1].clamp(0.0, world.size as f32 - 1.0) as u32;
-    (x, y)
+    // Wraps rather than clamps: on a torus a body at x = -0.3 is at the far
+    // right edge, not pinned against a wall that no longer exists. Clamping
+    // here would silently pile everything that crossed the seam into the
+    // outermost row of the field grids.
+    let n = world.size as f32;
+    let x = wrap_pos(pos[0], n) as u32;
+    let y = wrap_pos(pos[1], n) as u32;
+    (x.min(world.size - 1), y.min(world.size - 1))
 }
 
 /// exp(-distance) similarity, in (0, 1], between `slot`'s kin_signature and
@@ -494,10 +528,11 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
         let other_pos = world.individuals.root_pos[other];
-        let d = dist(other_pos, pos);
+        let d = dist_wrapped(other_pos, pos, world.size as f32);
         if d > range || d < 1e-6 { continue; }
         let other_size = body_size_sum(world, other) * world.individuals.size_scale[other];
-        let delta = [other_pos[0] - pos[0], other_pos[1] - pos[1]];
+        let n = world.size as f32;
+        let delta = [wrap_delta(other_pos[0] - pos[0], n), wrap_delta(other_pos[1] - pos[1], n)];
         if other_size > my_size * 1.15 {
             if best_threat.map_or(true, |(bd, _)| d < bd) { best_threat = Some((d, delta)); }
         } else if other_size < my_size * 0.85 {
@@ -582,8 +617,9 @@ fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f
     // concentration -- see fields.rs's `territory` field doc comment for
     // why there's no per-owner distinction here.
     let home = world.individuals.home_pos[slot];
-    let home_dx = ((home[0] - pos[0]) / crate::HOME_RANGE_NORM).tanh();
-    let home_dy = ((home[1] - pos[1]) / crate::HOME_RANGE_NORM).tanh();
+    let wn = world.size as f32;
+    let home_dx = (wrap_delta(home[0] - pos[0], wn) / crate::HOME_RANGE_NORM).tanh();
+    let home_dy = (wrap_delta(home[1] - pos[1], wn) / crate::HOME_RANGE_NORM).tanh();
     let territory_local = crate::fields::Fields::sample(&world.fields.territory, world.size, pos).tanh();
 
     let mut out = [0f32; SENSE_DIM];
@@ -675,6 +711,7 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<V
         .collect();
     if slots.is_empty() { return; }
     let t = world.sim_time;
+    let wn = world.size as f32;
     for slot in slots {
         let off = world.individuals.pixel_offset[slot] as usize;
         let count = world.individuals.pixel_count[slot] as usize;
@@ -713,8 +750,8 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<V
             // Is any tentacle actually on it?
             let mut gripped = false;
             for (tp, tg) in &tentacles {
-                let dx = their_root[0] - tp[0];
-                let dy = their_root[1] - tp[1];
+                let dx = wrap_delta(their_root[0] - tp[0], wn);
+                let dy = wrap_delta(their_root[1] - tp[1], wn);
                 let reach = crate::TENTACLE_REACH * tg.max(0.2);
                 if dx * dx + dy * dy < reach * reach { gripped = true; break; }
             }
@@ -723,14 +760,15 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<V
             let mut best = mouths[0];
             let mut best_d2 = f32::MAX;
             for m in &mouths {
-                let d2 = (m[0] - their_root[0]).powi(2) + (m[1] - their_root[1]).powi(2);
+                let d2 = wrap_delta(m[0] - their_root[0], wn).powi(2)
+                    + wrap_delta(m[1] - their_root[1], wn).powi(2);
                 if d2 < best_d2 { best_d2 = d2; best = *m; }
             }
             let d = best_d2.sqrt();
             if d < 1e-4 { continue; }
             let pull = crate::TENTACLE_PULL * world.dt;
-            let ux = (best[0] - their_root[0]) / d;
-            let uy = (best[1] - their_root[1]) / d;
+            let ux = wrap_delta(best[0] - their_root[0], wn) / d;
+            let uy = wrap_delta(best[1] - their_root[1], wn) / d;
             world.individuals.velocity[other][0] += ux * pull;
             world.individuals.velocity[other][1] += uy * pull;
             // Newton's third law: hauling prey in tugs the hauler back, in
@@ -777,6 +815,7 @@ fn bite_target(
     let p_count = world.individuals.pixel_count[prey] as usize;
     if a_count == 0 || p_count == 0 { return None; }
 
+    let wn = world.size as f32;
     let a_scale = world.individuals.size_scale[attacker];
     let p_scale = world.individuals.size_scale[prey];
     // Reuse this tick's cached forward kinematics rather than recomputing two
@@ -817,8 +856,8 @@ fn bite_target(
             let bit = crate::pixels::girth(&world.pixels, p_off + pk) * p_scale;
             // It has to fit in the mouth.
             if bit >= gape { continue; }
-            let dx = p_pos[pk][0] - a_pos[ak][0];
-            let dy = p_pos[pk][1] - a_pos[ak][1];
+            let dx = wrap_delta(p_pos[pk][0] - a_pos[ak][0], wn);
+            let dy = wrap_delta(p_pos[pk][1] - a_pos[ak][1], wn);
             let d2 = dx * dx + dy * dy;
             let reach = crate::COLLISION_RADIUS * 0.5 * (gape + bit) + crate::BITE_REACH_SLACK;
             if d2 > reach * reach { continue; }
@@ -1060,7 +1099,7 @@ fn mate_and_crowding(world: &World, slot: usize, grid: &SpatialGrid) -> (bool, u
     for other in grid.nearby_radius(pos, crate::MATE_RADIUS) {
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
-        if dist(world.individuals.root_pos[other], pos) < crate::BREEDING_SPACE_RADIUS {
+        if dist_wrapped(world.individuals.root_pos[other], pos, world.size as f32) < crate::BREEDING_SPACE_RADIUS {
             crowd += 1;
         }
         if found_mate { continue; }
@@ -1083,7 +1122,7 @@ fn mate_and_crowding(world: &World, slot: usize, grid: &SpatialGrid) -> (bool, u
         if !other_mature { continue; }
         let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= gestation_ticks(world, other);
         if !other_recovered { continue; }
-        if dist(world.individuals.root_pos[other], pos) < crate::MATE_RADIUS { found_mate = true; }
+        if dist_wrapped(world.individuals.root_pos[other], pos, world.size as f32) < crate::MATE_RADIUS { found_mate = true; }
     }
     (found_mate, crowd)
 }
@@ -1095,7 +1134,7 @@ pub fn conspecific_densities(world: &World) -> Vec<f32> {
     let alive_slots: Vec<usize> = (0..world.individuals.len())
         .filter(|&s| world.individuals.alive[s])
         .collect();
-    let grid = SpatialGrid::build(alive_slots.iter().map(|&s| (s as u32, world.individuals.root_pos[s])));
+    let grid = SpatialGrid::build(world.size as f32, alive_slots.iter().map(|&s| (s as u32, world.individuals.root_pos[s])));
     alive_slots
         .iter()
         .map(|&slot| kin_similarity_nearest(world, slot, &grid).1)
@@ -1120,7 +1159,7 @@ pub fn tick(world: &mut World) {
 
     let n = world.individuals.len();
     let alive_slots: Vec<usize> = timed!("collect_alive", (0..n).filter(|&s| world.individuals.alive[s]).collect());
-    let grid = timed!("spatial_grid", SpatialGrid::build(alive_slots.iter().map(|&s| (s as u32, world.individuals.root_pos[s]))));
+    let grid = timed!("spatial_grid", SpatialGrid::build(world.size as f32, alive_slots.iter().map(|&s| (s as u32, world.individuals.root_pos[s]))));
 
     // Cache FK+velocity for every alive individual once (own position may go
     // stale mid-tick if sliced by an earlier individual -- re-verified via
@@ -1153,7 +1192,7 @@ pub fn tick(world: &mut World) {
     // Broad phase for contact, over components rather than over animals. See
     // PartGrid: indexing whole bodies by their root forced every query to be
     // wide enough to reach the largest animal in the world.
-    let part_grid = PartGrid::build(alive_slots.iter().flat_map(|&slot| {
+    let part_grid = PartGrid::build(world.size as f32, alive_slots.iter().flat_map(|&slot| {
         pos_cache[slot]
             .iter()
             .flat_map(move |ps| ps.iter().enumerate().map(move |(k, p)| (slot as u32, k as u32, *p)))
@@ -1385,7 +1424,7 @@ pub fn tick(world: &mut World) {
     // death) has real cross-individual mutation and stays sequential --
     // that's the actual reason this couldn't just be one big par_iter.
     let t0 = std::time::Instant::now();
-    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32, [f32; 2])> = deciding
+    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32, [f32; 2], f32)> = deciding
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
@@ -1416,7 +1455,7 @@ pub fn tick(world: &mut World) {
             // than rebuilding forward kinematics for it in the sequential
             // phase.
             let (com, moment) = mass_center_and_moment(world, slot, &ind_pos);
-            let (contact, separation) = contact_force(world, slot, &ind_pos, &part_grid, &pos_cache, max_girth);
+            let (contact, separation, pressure) = contact_force(world, slot, &ind_pos, &part_grid, &pos_cache, max_girth);
             // Deterministic sampling (no RNG call here -- this closure runs
             // in parallel and must stay a pure function of tick-start
             // state, per the comment above): a modulo on slot+tick spreads
@@ -1443,7 +1482,7 @@ pub fn tick(world: &mut World) {
             };
             // Raw density carried through rather than re-scanning
             // neighbors in the sequential phase where the drain is applied.
-            (d, thrust, contact, sample, conspecific_density, torque, com, moment, separation)
+            (d, thrust, contact, sample, conspecific_density, torque, com, moment, separation, pressure)
         })
         .collect();
     timings.push(("decide_parallel", t0.elapsed().as_secs_f64() * 1000.0));
@@ -1467,7 +1506,8 @@ pub fn tick(world: &mut World) {
         // reproductions collapsed onto one row (observed reaching 28), which
         // is not a per-step reward at all and wrecked the training targets.
         world.individuals.pending_reward[slot] = 0.0;
-        let (d, thrust, contact, _, crowding, torque, com, moment, separation) = &pre[i];
+        let (d, thrust, contact, _, crowding, torque, com, moment, separation, pressure) = &pre[i];
+        let pressure = *pressure;
         let crowding = *crowding;
         let torque = *torque;
         let (com, moment) = (*com, *moment);
@@ -1628,18 +1668,15 @@ pub fn tick(world: &mut World) {
             // at edges over time, worst at corners where two walls compound.
             // Reflecting (bouncing) is the physically correct boundary for
             // those three.
-            if new_pos[1] <= 0.0 && new_vel[1] < 0.0 {
-                new_vel[1] = 0.0; // the floor: inelastic
-            } else if new_pos[1] >= world.size as f32 - 1.0 && new_vel[1] > 0.0 {
-                new_vel[1] = -new_vel[1] * 0.5; // the "ceiling": reflect
-            }
-            if new_pos[0] <= 0.0 && new_vel[0] < 0.0 {
-                new_vel[0] = -new_vel[0] * 0.5; // side walls: reflect
-            } else if new_pos[0] >= world.size as f32 - 1.0 && new_vel[0] > 0.0 {
-                new_vel[0] = -new_vel[0] * 0.5;
-            }
-            new_pos[0] = new_pos[0].clamp(0.0, world.size as f32 - 1.0);
-            new_pos[1] = new_pos[1].clamp(0.0, world.size as f32 - 1.0);
+            // The world has no edges any more -- opposite sides are joined,
+            // so a body leaving one side arrives at the other. This removes
+            // the boundary entirely rather than making it better behaved:
+            // there is no wall to be pinned against, no corner to accumulate
+            // in, and no edge population that lives differently from the
+            // middle purely because of where it happens to be.
+            let n = world.size as f32;
+            new_pos[0] = wrap_pos(new_pos[0], n);
+            new_pos[1] = wrap_pos(new_pos[1], n);
 
             // The sand seafloor is a real solid surface unless an
             // individual has evolved enough dig_strength to penetrate it --
@@ -1737,8 +1774,26 @@ pub fn tick(world: &mut World) {
             // organ: a second way to be large. Without it the only route to a
             // big body is hunting, so every large animal in the world is a
             // predator and there is one trophic ladder instead of a food web.
+            // A filter only works on water it actually moves through. A
+            // basking shark does not hover -- it swims constantly with its
+            // mouth open, and the food it gets is set by the volume it
+            // sweeps, which is mesh area times speed. Without that condition
+            // the organ was a free lunch and it broke the world: it raised
+            // the mass at which grazing pays by roughly fourteen times, which
+            // cancelled the whole reason large animals had to hunt, so 97% of
+            // the population grew a filter, sat still, and idled on 723 mean
+            // energy. Everything stopped moving, which is exactly what was
+            // reported by eye.
+            //
+            // Tying yield to swept volume makes the strategy cost what it
+            // should: a filter feeder has to keep swimming to eat, and pays
+            // the movement energy to do it.
             let filter_area = organ_area(world, slot, crate::pixels::PART_FILTER);
-            let graze_ref = world.graze_mass_ref * (1.0 + crate::FILTER_GRAZE_BONUS * filter_area);
+            let vel = world.individuals.velocity[slot];
+            let speed_frac =
+                ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() / crate::FILTER_FLOW_SPEED).clamp(0.0, 1.0);
+            let graze_ref =
+                world.graze_mass_ref * (1.0 + crate::FILTER_GRAZE_BONUS * filter_area * speed_frac);
             let graze_efficiency = 1.0 / (1.0 + graze_mass / graze_ref);
             let eaten = world.fields.food[idx].min(crate::EAT_RATE * 0.1);
             world.fields.food[idx] -= eaten;
@@ -1813,6 +1868,42 @@ pub fn tick(world: &mut World) {
                     * (1.0 + mass * crate::CROWDING_SIZE_FACTOR);
             }
 
+            // Density-dependent mortality. The crowding cost above is a gentle
+            // energy tax on kin density around the root, and it never
+            // regulated anything: the world ran to 1778 animals and 30799
+            // components in a 240x240 space with starvation at 5.8% of deaths,
+            // so nothing was limiting numbers at all. Food abundance was doing
+            // no work and neither was the tax.
+            //
+            // Density-dependent mortality is the standard regulator in real
+            // populations, and it is a pressure rather than a rule about
+            // behaviour: crushed animals interfere, foul their surroundings
+            // and fail, and the intensity rises faster than linearly with how
+            // packed they are. Measured against actual bodies pressing on this
+            // one, blind to kinship -- a sibling takes up exactly as much room
+            // as a stranger -- so a lineage cannot escape it by simply filling
+            // the world with its own copies, which is precisely what it had
+            // been doing.
+            //
+            // Nothing here scripts a response. It makes space worth having,
+            // which is what gives dispersal, spacing and defending a patch
+            // something to be selected FOR. The animal can already sense
+            // crowding and already has an aggression output; this is the
+            // reason to use them.
+            let over = (pressure - world.space_pressure_tolerance).max(0.0);
+            if over > 0.0 {
+                let mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
+                world.individuals.energy[slot] -=
+                    crate::SPACE_PRESSURE_ENERGY_COST * over * over * (1.0 + mass * crate::CROWDING_SIZE_FACTOR);
+                let risk = (world.space_pressure_mortality * over * over)
+                    .min(crate::SPACE_PRESSURE_MORTALITY_MAX);
+                if risk > 0.0 && world.rng.random::<f32>() < risk {
+                    kill(world, slot);
+                    world.deaths_crowding += 1;
+                    continue;
+                }
+            }
+
             // Contested ground. Sitting inside someone else's scent marks is
             // expensive: it is the cost of trespassing on a defended range,
             // and it is what gives territorial marking a consequence rather
@@ -1823,7 +1914,7 @@ pub fn tick(world: &mut World) {
             if local_marks > crate::TRESPASS_MARK_THRESHOLD {
                 let home = world.individuals.home_pos[slot];
                 let pos = world.individuals.root_pos[slot];
-                let from_home = ((home[0] - pos[0]).powi(2) + (home[1] - pos[1]).powi(2)).sqrt();
+                let from_home = dist_wrapped(home, pos, world.size as f32);
                 if from_home > crate::BREEDING_SPACE_RADIUS {
                     world.individuals.energy[slot] -=
                         crate::TRESPASS_ENERGY_COST * (local_marks - crate::TRESPASS_MARK_THRESHOLD);
@@ -2115,7 +2206,19 @@ fn contact_force(
     part_grid: &PartGrid,
     pos_cache: &[Option<Vec<[f32; 2]>>],
     max_girth: f32,
-) -> ([f32; 2], [f32; 2]) {
+) -> ([f32; 2], [f32; 2], f32) {
+    // Space pressure: how many OTHER animals' components are pressing into
+    // the neighbourhood of this animal's own, per component of its body.
+    //
+    // The existing crowding measure counted genetically similar neighbours
+    // around the root, which is wrong twice over. It ignored a crush of
+    // unrelated animals entirely -- a body could be buried in strangers at no
+    // cost -- and counting roots ignores that a forty-part animal occupies far
+    // more room than a three-part one. This counts bodies against bodies, and
+    // is blind to kinship on purpose: competition for physical space does not
+    // care who your relatives are.
+    let mut foreign_near = 0.0f32;
+    let wn = world.size as f32;
     let mut push = [0f32; 2];
     // Contact was a pure force: divided by mass, fought by damping, and
     // integrated over time. That is fine for a light touch and hopeless for a
@@ -2153,8 +2256,8 @@ fn contact_force(
                 Some(v) if v.len() == world.individuals.pixel_count[other] as usize => v[oi],
                 _ => return,
             };
-            let dx = p[0] - op[0];
-            let dy = p[1] - op[1];
+            let dx = wrap_delta(p[0] - op[0], wn);
+            let dy = wrap_delta(p[1] - op[1], wn);
             let d2 = dx * dx + dy * dy;
             if d2 <= 1e-12 { return; }
             let other_off = world.individuals.pixel_offset[other] as usize;
@@ -2162,6 +2265,16 @@ fn contact_force(
             let reach = crate::COLLISION_RADIUS
                 * 0.5
                 * (my_girth + crate::pixels::girth(&world.pixels, other_off + oi) * other_scale);
+            // Count only components genuinely pressing on this one. The grid
+            // walks whole CELLS, so the candidates it hands back cover a block
+            // several times wider than any contact -- counting all of them
+            // overstated pressure by more than an order of magnitude and
+            // pinned essentially every animal at the maximum death rate, which
+            // emptied the world.
+            let crowd_reach = reach * crate::SPACE_PRESSURE_RANGE;
+            if d2 < crowd_reach * crowd_reach {
+                foreign_near += 1.0;
+            }
             if d2 >= reach * reach { return; }
             let d = d2.sqrt();
             let overlap = reach - d;
@@ -2236,7 +2349,8 @@ fn contact_force(
         separation[0] += terrain_correction[0];
         separation[1] += terrain_correction[1];
     }
-    (push, separation)
+    let pressure = if ind_pos.is_empty() { 0.0 } else { foreign_near / ind_pos.len() as f32 };
+    (push, separation, pressure)
 }
 
 fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f32; 2]>>], vel_cache: &[Option<Vec<[f32; 2]>>], grid: &SpatialGrid) {

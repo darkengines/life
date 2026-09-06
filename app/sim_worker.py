@@ -53,7 +53,9 @@ WORLD_SIZE = 240  # was 160 -- a real "bigger, more diverse world": 2.25x the ar
 # energy"). The two go together: scarcer food only produces interesting
 # behaviour if a body can bank a surplus and live off it, which is what the
 # new storage capacity provides. Scarcity without a larder is just starvation.
-FOOD_REGROW_RATE = 0.009
+# Cut again: at 0.009 the population still idled on 723 mean energy with
+# animals standing still, so food was doing no selecting whatever.
+FOOD_REGROW_RATE = 0.004
 FOOD_PATCHES = 50  # was 25
 POP_CAP = 6000  # was 4000
 FOUNDER_COUNT = 300  # was 160 -- a bigger world needs more founders to avoid the Allee effect -- the new,

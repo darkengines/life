@@ -7,6 +7,7 @@ const CELL_SIZE: f32 = 3.0;
 
 pub struct SpatialGrid {
     cells: HashMap<(i32, i32), Vec<u32>>,
+    n_cells: i32,
 }
 
 /// A grid over individual COMPONENTS rather than over whole animals.
@@ -25,17 +26,22 @@ pub struct SpatialGrid {
 /// span of an animal.
 pub struct PartGrid {
     cells: HashMap<(i32, i32), Vec<(u32, u32)>>,
+    /// Cells per side. The world is a torus, so a query near one edge has to
+    /// reach round into the cells on the opposite edge; without this the seam
+    /// behaves as a wall that nothing can see across, which is the exact
+    /// artefact wrapping exists to remove.
+    n_cells: i32,
 }
 
 const PART_CELL_SIZE: f32 = 1.5;
 
 impl PartGrid {
-    pub fn build(parts: impl Iterator<Item = (u32, u32, [f32; 2])>) -> Self {
+    pub fn build(world_size: f32, parts: impl Iterator<Item = (u32, u32, [f32; 2])>) -> Self {
         let mut cells: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
         for (slot, idx, pos) in parts {
             cells.entry(Self::cell_of(pos)).or_default().push((slot, idx));
         }
-        PartGrid { cells }
+        PartGrid { cells, n_cells: (world_size / PART_CELL_SIZE).ceil() as i32 }
     }
 
     fn cell_of(pos: [f32; 2]) -> (i32, i32) {
@@ -49,9 +55,11 @@ impl PartGrid {
     pub fn for_each_near(&self, pos: [f32; 2], radius: f32, mut f: impl FnMut(u32, u32)) {
         let (cx, cy) = Self::cell_of(pos);
         let reach = (radius / PART_CELL_SIZE).ceil() as i32;
+        let n = self.n_cells.max(1);
         for dx in -reach..=reach {
             for dy in -reach..=reach {
-                if let Some(v) = self.cells.get(&(cx + dx, cy + dy)) {
+                let key = (wrap_cell(cx + dx, n), wrap_cell(cy + dy, n));
+                if let Some(v) = self.cells.get(&key) {
                     for &(slot, idx) in v {
                         f(slot, idx);
                     }
@@ -61,14 +69,22 @@ impl PartGrid {
     }
 }
 
+/// Folds a cell coordinate back into range, so the grid is a torus like the
+/// world it indexes.
+#[inline]
+fn wrap_cell(c: i32, n: i32) -> i32 {
+    let m = c % n;
+    if m < 0 { m + n } else { m }
+}
+
 impl SpatialGrid {
-    pub fn build(positions: impl Iterator<Item = (u32, [f32; 2])>) -> Self {
+    pub fn build(world_size: f32, positions: impl Iterator<Item = (u32, [f32; 2])>) -> Self {
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (slot, pos) in positions {
             let cell = Self::cell_of(pos);
             cells.entry(cell).or_default().push(slot);
         }
-        SpatialGrid { cells }
+        SpatialGrid { cells, n_cells: (world_size / CELL_SIZE).ceil() as i32 }
     }
 
     fn cell_of(pos: [f32; 2]) -> (i32, i32) {
@@ -92,12 +108,20 @@ impl SpatialGrid {
         let (cx, cy) = Self::cell_of(pos);
         let reach = (radius / CELL_SIZE).ceil() as i32;
         let mut out = Vec::new();
+        let n = self.n_cells.max(1);
         for dx in -reach..=reach {
             for dy in -reach..=reach {
-                if let Some(v) = self.cells.get(&(cx + dx, cy + dy)) {
+                let key = (wrap_cell(cx + dx, n), wrap_cell(cy + dy, n));
+                if let Some(v) = self.cells.get(&key) {
                     out.extend_from_slice(v);
                 }
             }
+        }
+        // A query wider than the world would otherwise visit the same cell
+        // several times and count its occupants more than once.
+        if reach * 2 + 1 >= n {
+            out.sort_unstable();
+            out.dedup();
         }
         out
     }

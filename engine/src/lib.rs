@@ -81,6 +81,10 @@ pub const GRAZE_MASS_REF: f32 = 30.0;
 /// stops paying. This is the whole point of the organ: it buys the right to
 /// be large AND still live on the food field.
 pub const FILTER_GRAZE_BONUS: f32 = 0.9;
+/// The speed at which a filter mesh is working at full capacity. Below it the
+/// organ delivers proportionally less, and a stationary filter feeder gets
+/// nothing from it at all -- a mesh only strains water that passes through it.
+pub const FILTER_FLOW_SPEED: f32 = 1.2;
 // A drifting resource mosaic. Blooms open at a new place now and then while
 // standing capacity everywhere slowly fades, so a patch is a temporary thing
 // and a grazer eventually has to go and find the next one.
@@ -432,6 +436,19 @@ pub const HOME_RANGE_NORM: f32 = 50.0;
 // needs proportionally more room than a small one.
 pub const CROWDING_TOLERANCE: f32 = 3.0;
 pub const CROWDING_ENERGY_COST: f32 = 0.012;
+/// Density-dependent mortality, measured against other animals' components
+/// pressing on this one's, per component, and blind to kinship. Quadratic
+/// because interference competition intensifies faster than linearly with
+/// packing. This is what actually regulates numbers -- the energy tax above
+/// never did.
+/// How far beyond actual contact a neighbouring component still counts as
+/// pressing on this one. Contact itself is too strict a test for "crowded" --
+/// animals packed shoulder to shoulder are crowded before they interpenetrate.
+pub const SPACE_PRESSURE_RANGE: f32 = 2.0;
+pub const SPACE_PRESSURE_TOLERANCE: f32 = 1.5;
+pub const SPACE_PRESSURE_ENERGY_COST: f32 = 0.05;
+pub const SPACE_PRESSURE_MORTALITY: f32 = 0.0009;
+pub const SPACE_PRESSURE_MORTALITY_MAX: f32 = 0.02;
 pub const CROWDING_SIZE_FACTOR: f32 = 0.02;
 // Trespassing on ground someone else has marked. This is what turns territory
 // marking from a decorative field into a defended range worth holding.
@@ -545,7 +562,13 @@ pub const CONTACT_CORRECTION_MAX: f32 = 0.6;
 // because undulation puts limbs inside stone with no translation at all.
 pub const TERRAIN_REPULSION_RANGE: f32 = 1.4;
 pub const TERRAIN_REPULSION_STIFFNESS: f32 = 3.0;
-pub const GRAVITY: f32 = 0.22;
+/// Terrain and gravity both belong to a world that has a bottom. The world's
+/// edges are now joined, so it has none: "down" wraps round to "up", a
+/// seafloor is a band across the middle of nothing, and rock rising from it is
+/// anchored to nothing. Both switched off together -- leaving gravity on
+/// without a floor would simply rain every animal through the seam forever.
+pub const TERRAIN_ENABLED: bool = false;
+pub const GRAVITY: f32 = 0.0;
 
 // Density-dependent cannibalism used to be modeled as a hardcoded PRESSURE
 // added straight to fight_urge once local density crossed a threshold --
@@ -739,6 +762,10 @@ pub struct World {
     pub deaths_starved: u64,
     pub deaths_predation: u64,
     pub deaths_popcap: u64,
+    /// Deaths from density-dependent mortality, reported separately so it is
+    /// visible whether crowding is actually regulating the population or just
+    /// adding noise to the other causes.
+    pub deaths_crowding: u64,
 
     pub timings: Vec<(&'static str, f64)>, // (phase, milliseconds) for the most recent tick -- diagnostic only
 
@@ -785,6 +812,10 @@ pub struct World {
     /// same as a world of evolved ones, then behaviour is not on the critical
     /// path to fitness and no amount of network capacity will change that.
     pub brain_noise: f32,
+    /// Runtime-overridable density-dependent mortality, so how hard crowding
+    /// bites can be swept rather than guessed.
+    pub space_pressure_tolerance: f32,
+    pub space_pressure_mortality: f32,
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
@@ -876,6 +907,7 @@ impl World {
             deaths_starved: 0,
             deaths_predation: 0,
             deaths_popcap: 0,
+            deaths_crowding: 0,
             food_regrow_rate,
             food_cap,
             timings: Vec::new(),
@@ -890,6 +922,8 @@ impl World {
             collision_stiffness: COLLISION_STIFFNESS,
             contact_correction: CONTACT_CORRECTION,
             brain_noise: 0.0,
+            space_pressure_tolerance: SPACE_PRESSURE_TOLERANCE,
+            space_pressure_mortality: SPACE_PRESSURE_MORTALITY,
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
@@ -999,7 +1033,7 @@ impl World {
         for slot in 0..self.individuals.len() {
             if self.individuals.alive[slot] && self.individuals.id[slot] == id {
                 let alive_slots: Vec<usize> = (0..self.individuals.len()).filter(|&s| self.individuals.alive[s]).collect();
-                let grid = crate::spatial::SpatialGrid::build(alive_slots.iter().map(|&s| (s as u32, self.individuals.root_pos[s])));
+                let grid = crate::spatial::SpatialGrid::build(self.size as f32, alive_slots.iter().map(|&s| (s as u32, self.individuals.root_pos[s])));
                 let pos = self.individuals.root_pos[slot];
                 let count = grid.nearby(pos).into_iter()
                     .filter(|&o| o as usize != slot && ((self.individuals.root_pos[o as usize][0]-pos[0]).powi(2) + (self.individuals.root_pos[o as usize][1]-pos[1]).powi(2)).sqrt() < crate::MATE_RADIUS)
@@ -1031,7 +1065,7 @@ impl World {
         for slot in 0..self.individuals.len() {
             if self.individuals.alive[slot] && self.individuals.id[slot] == id {
                 let alive_slots: Vec<usize> = (0..self.individuals.len()).filter(|&s| self.individuals.alive[s]).collect();
-                let grid = crate::spatial::SpatialGrid::build(alive_slots.iter().map(|&s| (s as u32, self.individuals.root_pos[s])));
+                let grid = crate::spatial::SpatialGrid::build(self.size as f32, alive_slots.iter().map(|&s| (s as u32, self.individuals.root_pos[s])));
                 return Some(physics::vision(self, slot, &grid));
             }
         }
@@ -1158,6 +1192,7 @@ impl World {
         d.set_item("starved", self.deaths_starved).unwrap();
         d.set_item("eaten", self.deaths_predation).unwrap();
         d.set_item("culled", self.deaths_popcap).unwrap();
+        d.set_item("crowded", self.deaths_crowding).unwrap();
         d
     }
     fn weather_name(&self) -> Option<&'static str> {
@@ -1466,6 +1501,12 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: overrides density-dependent mortality.
+    fn debug_set_space_pressure(&mut self, tolerance: f32, mortality: f32) {
+        self.space_pressure_tolerance = tolerance;
+        self.space_pressure_mortality = mortality;
     }
 
     /// Test-only: 0.0 leaves brains alone, 1.0 replaces every decision with
