@@ -12,10 +12,16 @@ pub enum TerrainKind {
 }
 
 pub const SAND_FLOOR_FRACTION: f32 = 0.09;
-const N_ROCK_CLUSTERS: u32 = 14;
+const N_ROCK_CLUSTERS: u32 = 26;
 // Reef structure. The world used to be a single open arena -- a sand floor
 // and a handful of solid rock blobs -- which meant there was nowhere a small
-// animal could go that a large one could not follow. Size-selective refuge
+// animal could go that a large one could not follow.
+//
+// Sized up after measuring: refuge worked in the right direction (small
+// creatures occupied positions with ~66% more surrounding rock than large
+// ones) but rock covered only 3.6% of the world, so it was a curiosity
+// rather than a habitat. A reef has to be a real fraction of the world for
+// living in it to be a viable strategy rather than a lucky hiding spot. Size-selective refuge
 // is the textbook mechanism that lets predator and prey coexist instead of
 // the predator simply eating everything, and it is also what produces
 // habitat specialisation for free: a body that fits in the reef lives a
@@ -24,7 +30,7 @@ const N_ROCK_CLUSTERS: u32 = 14;
 // collision does the rest.
 const N_TUNNELS_PER_CLUSTER: u32 = 3;
 const TUNNEL_STEPS: u32 = 90;
-const N_CREVICE_POCKETS: u32 = 26;
+const N_CREVICE_POCKETS: u32 = 70;
 
 pub struct Terrain {
     pub size: u32,
@@ -52,7 +58,7 @@ impl Terrain {
             } else {
                 rng.random_range(floor_height as f32..(size as f32 * 0.7).max(floor_height as f32 + 1.0))
             };
-            let radius = rng.random_range(size as f32 * 0.015..size as f32 * 0.04);
+            let radius = rng.random_range(size as f32 * 0.02..size as f32 * 0.065);
             let r2 = radius * radius;
             for x in 0..size {
                 for y in 0..size {
