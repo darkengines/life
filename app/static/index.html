@@ -742,15 +742,29 @@ function fkPositions(ind, simTime, rootPos, heading) {
   const phase = ind.bend_phase || 0;
   const angles = new Array(n);
   const positions = new Array(n);
+  const cumwave = new Array(n);
+  // Depth along the parent chain: the wave's position is how far a part is
+  // from the head, not the order it was grown in. Mirrors the engine.
+  const depth = new Array(n);
   for (let k = 0; k < n; k++) {
-    const wave = flex[k] * amp * Math.sin(2 * Math.PI * freq * simTime + phase + k * 0.7);
+    const p = ind.parents[k];
+    depth[k] = p < 0 ? 0 : depth[p] + 1;
+  }
+  const headingAdj = heading - (ind.axis_offset || 0);
+  for (let k = 0; k < n; k++) {
+    const wave = flex[k] * amp * Math.sin(2 * Math.PI * freq * simTime + phase + depth[k] * 0.7)
+      + (ind.turn_curvature || 0) * flex[k];
     const parent = ind.parents[k];
     const segLen = sizeScale * (partSize[k] !== undefined ? partSize[k] : 1.0);
     if (parent < 0) {
-      angles[k] = heading + wave;
+      cumwave[k] = wave;
+      angles[k] = headingAdj + wave;
       positions[k] = rootPos;
     } else {
-      angles[k] = angles[parent] + restAngle[k] + wave;
+      // rest_angle is ABSOLUTE (the direction growth placed this part in);
+      // only the bending accumulates down the chain. Must match the engine.
+      cumwave[k] = cumwave[parent] + wave;
+      angles[k] = headingAdj + restAngle[k] + cumwave[k];
       positions[k] = [positions[parent][0] + segLen * Math.cos(angles[k]), positions[parent][1] + segLen * Math.sin(angles[k])];
     }
   }

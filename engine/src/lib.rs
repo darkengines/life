@@ -524,6 +524,10 @@ pub const SWIM_GAIN_MIN: f32 = 0.15;
 pub const SWIM_GAIN_MAX: f32 = 1.9;
 // Turning as physics rather than assignment. The brain holds a body
 // curvature; fluid torque on that curved body rotates it, damped by water.
+// Phase advance per unit of body depth: how many radians the bending wave
+// shifts between one part and the next one further from the head. Sets the
+// wavelength of the travelling wave running down the body.
+pub const BODY_WAVE_NUMBER: f32 = 0.7;
 pub const TURN_CURVATURE_SCALE: f32 = 0.9;
 pub const TURN_POSTURE_BIAS_SCALE: f32 = 0.35;
 pub const ROTATIONAL_INERTIA: f32 = 2.5;
@@ -633,6 +637,9 @@ pub struct World {
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
+    /// Runtime-overridable GRAVITY, so locomotion can be probed in
+    /// isolation without sinking confounding the measurement.
+    pub gravity: f32,
 
     // The world's shared perception encoder (see individuals::encode). One
     // matrix for every creature alive, initialised randomly. A random
@@ -704,6 +711,7 @@ impl World {
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
             graze_mass_ref: GRAZE_MASS_REF,
             thermal_noise: THERMAL_NOISE,
+            gravity: GRAVITY,
             shared_enc_w,
             shared_enc_b,
             shared_policy: None,
@@ -1088,6 +1096,8 @@ impl World {
             // The frontend reconstructs bodies with the same FK formula, so it
             // needs the same effort value or its animation desynchronises.
             d.set_item("swim_gain", self.individuals.swim_gain[slot]).unwrap();
+            d.set_item("turn_curvature", self.individuals.turn_curvature[slot]).unwrap();
+            d.set_item("axis_offset", self.individuals.axis_offset[slot]).unwrap();
             // bite_force/toughness/stickiness/weight_transmission_rate/
             // crawl_affinity/acid_secretion/light_emission deliberately are
             // NOT here: the frontend never reads them per-individual (only
@@ -1160,6 +1170,37 @@ impl World {
         d.set_item("latent_dim", individuals::LATENT_DIM).unwrap();
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
+    }
+
+    /// Test-only: overrides gravity.
+    fn debug_set_gravity(&mut self, v: f32) { self.gravity = v; }
+
+    /// Test-only: forces an individual's heading, to hold a course while its
+    /// propulsion is measured.
+    fn debug_set_heading(&mut self, id: u64, h: f32) -> bool {
+        match self.individuals.id_to_slot.get(&id) {
+            Some(&slot) if self.individuals.alive[slot] => {
+                self.individuals.heading[slot] = h;
+                self.individuals.angular_velocity[slot] = 0.0;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Test-only: grows one part, so a probe body can be built deterministically.
+    fn debug_grow(&mut self, id: u64) -> bool {
+        match self.individuals.id_to_slot.get(&id) {
+            Some(&slot) if self.individuals.alive[slot] => {
+                individuals::grow_one_pixel(&mut self.individuals, &mut self.pixels, &mut self.rng, slot)
+            }
+            _ => false,
+        }
+    }
+
+    /// Test-only: the body's own anterior axis offset.
+    fn debug_axis_offset(&self, id: u64) -> Option<f32> {
+        self.individuals.id_to_slot.get(&id).map(|&s| self.individuals.axis_offset[s])
     }
 
     /// Test-only: overrides the thermal noise floor.

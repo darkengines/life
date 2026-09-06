@@ -63,6 +63,29 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
     // sync anywhere else.
     let scale = world.individuals.size_scale[slot];
 
+    // Depth along the parent chain, i.e. how far each part is from the head.
+    //
+    // The bending wave used the part's ARRAY INDEX as its position in the
+    // wave. In an unbranched chain index happens to equal distance from the
+    // head, so that worked by accident -- but a branched body's index is
+    // just the order parts were grown in, which has no relationship to where
+    // they sit. The result was not a travelling wave at all: branches flapped
+    // incoherently against each other, thrust never summed to a consistent
+    // direction, and heading-vs-movement stayed near random even with all
+    // noise removed. Phasing by DEPTH makes every branch undulate as a
+    // function of its real distance from the head, the way an actual animal
+    // does. Parents always precede their children in this array (growth
+    // appends), so one forward pass suffices.
+    let mut depth = vec![0f32; count];
+    for k in 0..count {
+        let parent = world.pixels.parent_idx[offset + k];
+        depth[k] = if parent < 0 { 0.0 } else { depth[parent as usize] + 1.0 };
+    }
+
+    // Accumulated bending along the parent chain, kept separate from the
+    // rest pose. See the angle assignment below for why the two must not be
+    // conflated.
+    let mut cumwave = vec![0f32; count];
     let mut angles = vec![0f32; count];
     let mut positions = vec![[0f32; 2]; count];
     for k in 0..count {
@@ -71,7 +94,7 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // curved body pushes water to one side, which is what produces the
         // torque that turns it -- the animal steers by SHAPING ITSELF, not by
         // having its orientation overwritten.
-        let raw_wave = flex * amp * (std::f32::consts::TAU * freq * t + phase + (k as f32) * 0.7).sin()
+        let raw_wave = flex * amp * (std::f32::consts::TAU * freq * t + phase + depth[k] * crate::BODY_WAVE_NUMBER).sin()
             + world.individuals.turn_curvature[slot] * flex;
         // Joint angle limits: a real hinge constraint on how far THIS
         // joint's animated bend can deviate from its rest pose, heritable
@@ -89,11 +112,24 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // uniformly everywhere.
         let seg_len = scale * world.pixels.size[offset + k];
         if parent < 0 {
+            cumwave[k] = wave;
             angles[k] = heading + wave;
             positions[k] = root;
         } else {
             let p = parent as usize;
-            angles[k] = angles[p] + world.pixels.rest_angle[offset + k] + wave;
+            // rest_angle is an ABSOLUTE direction, not an angle relative to
+            // the parent. Growth builds bodies as a grid polyomino, placing
+            // each part in a compass direction from its parent and refusing
+            // to occupy a cell twice -- but this chain summed rest angles
+            // cumulatively, so the body actually rendered was a different
+            // shape from the one growth designed: chains curled in on
+            // themselves, the overlap check became meaningless, and
+            // undulation travelled along a knot instead of a body. Bending
+            // still has to accumulate down the chain (that is what a
+            // travelling wave IS), so the wave is summed separately and
+            // added to the absolute rest direction.
+            cumwave[k] = cumwave[p] + wave;
+            angles[k] = heading + world.pixels.rest_angle[offset + k] + cumwave[k];
             positions[k] = [positions[p][0] + seg_len * angles[k].cos(), positions[p][1] + seg_len * angles[k].sin()];
         }
     }
@@ -1036,7 +1072,7 @@ pub fn tick(world: &mut World) {
             let fin = thrust_multiplier(world, slot);
             let tn = world.thermal_noise;
             let noise = [normal(&mut world.rng, 0.0, tn), normal(&mut world.rng, 0.0, tn)];
-            let gravity_force = [0.0, -crate::GRAVITY * mass];
+            let gravity_force = [0.0, -world.gravity * mass];
             let vel = world.individuals.velocity[slot];
             let accel = [
                 (thrust[0] * mobility * fin + contact[0] + gravity_force[0] + crawl_force[0] * mobility) / mass - crate::LINEAR_DAMPING * vel[0] + noise[0] * mobility / mass.sqrt(),
