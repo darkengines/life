@@ -320,9 +320,16 @@ Status key: **[ ]** not started · **[~]** partially done · **[?]** needs inves
   partitioning, or spatial niches achieve the same end without the population cost.
 - **[ ] Active kin defence.** Territory marking exists, but there is no way to sense "a relative is
   under attack right now", which was named as a missing context for realistic aggression.
+- **[ ] Generalise niche construction into one primitive.** The single highest-value structural idea
+  identified so far. The engine already contains three *unconnected* instances of "organism modifies
+  the environment, and that modification changes the fitness landscape": pheromone trails, territory
+  scent marks, and sand digging. Treating them as one mechanism would make burrowing, nest building,
+  trap making, food caching and shelter construction fall out of the same primitive instead of each
+  needing its own bespoke system — which is exactly the shape of open-ended complexity this project
+  is after. See bibliography §D.
 - **[ ] Emergent organs.** The evolved `storage` trait (a de-facto belly/mouth anchor) hints at what
   is possible. Making functional organs *emerge* rather than hardcoding "stomach = X" is the most
-  promising direction in the bibliography (§6, Moreno et al.).
+  promising direction in the bibliography (§A, Moreno et al.).
 - **[ ] Richer weather / seasons / geological change.** Only three weather events exist; a genuinely
   *dynamic* world was requested repeatedly.
 - **[ ] Predator/prey coevolutionary cycles** — bibliography §2 and §9 describe long-period cycles
@@ -417,74 +424,138 @@ exclusion, and negative frequency-dependent (Red Queen) selection.
 
 ### Reading list for future mechanics
 
-Curated for finding **transposable mechanisms**, not general explanations or code.
-*Suggested order: 1 → 2 → 4 → 6 → 5 → 3 → 9 → 10.*
+Curated for finding **transposable mechanisms**, not general explanations or code. Organised by the
+five research domains that matter most for this simulation. A good starting path through it:
+Connelly (pheromones) → Ito (predator–prey) → Framsticks → Moreno (multicellularity) → MODES.
 
-**1. Evolved chemical communication / stigmergy**
-- Connelly, McKinley & Beckmann (2009), *Evolving Cooperative Pheromone Usage in Digital Organisms* —
-  digital organisms evolve pheromone use to coordinate movement; cooperative strategies **emerge**
-  rather than being scripted. [PDF](https://citeseerx.ist.psu.edu/document?doi=34929424598cf8b708f158311062d8db28e8c4fa&repid=rep1&type=pdf)
-- Search terms: *digital organisms pheromone*, *evolved chemical communication*, *evolutionary
-  stigmergy*, *pheromone-based collective behavior artificial life*.
+#### A. Evo-devo and morphological development
+*Emergent organs, limbs, mouths, digestive systems, segmentation, juvenile vs adult forms.*
 
-**2. Morphology ↔ behaviour ↔ selection**
-- Ito et al., *Population and Evolutionary Dynamics based on Predator-Prey Relationships in a 3D
-  Physical Simulation* — evolvable morphology *and* behaviour in a physical world; observes long
-  evolutionary cycles from coevolving defensive strategies. [PubMed](https://pubmed.ncbi.nlm.nih.gov/26934093/)
-- Ito, Pilat, Suzuki & Arita (ECAL 2015), *Evolutionary change precedes extinction in eco-evolutionary
-  dynamics based on a 3D virtual predator-prey system*. [Link](https://www.cs.york.ac.uk/nature/ecal2015/paper-147.html)
-
-**3. Morphology as a real ecological factor**
-- Danca et al. (2015), *How morphology of artificial organisms influences their evolution* — avoids the
-  "genome → a few statistics → fitness" shortcut; locomotion, foraging and competition all depend on
-  the morphology the genome produces. [ScienceDirect](https://www.sciencedirect.com/science/article/abs/pii/S1476945X15001014)
-
-**4. Framsticks** — genotype → physical morphology + control system, with evolution, coevolution,
-multiple populations, species and ecosystems. One of the most relevant complete architectures.
-- [framsticks.com](https://www.framsticks.com/) ·
-  [Komosinski & Ulatowski (1998)](https://www.framsticks.com/files/common/Komosinski_Framsticks_ECML1998.pdf) ·
-  [resources](https://www.framsticks.com/node/343)
-
-**5. Morphological evolution and development**
-- Silveira & Massad (1998), *Modeling and Simulating Morphological Evolution in an Artificial Life
-  Environment* — resource distribution exerts indirect selection on morphology. [PubMed](https://pubmed.ncbi.nlm.nih.gov/9561807/)
 - *Morphological Development at the Evolutionary Timescale: Robotic Developmental Evolution*
   (Artificial Life, 2022) — separates genome evolution from **body development**, with part-composed
   structures and evolvable muscles. [MIT Press](https://direct.mit.edu/artl/article/28/1/3/109958/)
-
-**6. Multicellularity and the emergence of organs**
+- *How morphological development can guide evolution* (Scientific Reports, 2018) — organisms that
+  change morphology *while behaving*; directly relevant to juvenile → adult body plans, which this
+  engine currently reduces to uniform inflation of a birth-fixed plan.
+  [Nature](https://www.nature.com/articles/s41598-018-31868-7)
+- Danca et al. (2015), *How morphology of artificial organisms influences their evolution* — avoids
+  the "genome → a few statistics → fitness" shortcut; locomotion, foraging and competition all depend
+  on the morphology the genome produces.
+  [ScienceDirect](https://www.sciencedirect.com/science/article/abs/pii/S1476945X15001014)
+- Silveira & Massad (1998), *Modeling and Simulating Morphological Evolution in an Artificial Life
+  Environment* — resource distribution exerting indirect selection on morphology.
+  [PubMed](https://pubmed.ncbi.nlm.nih.gov/9561807/)
+- *Guideless Artificial Life Model for Reproduction, Development, and Interactions* (Artificial Life,
+  2025) — treats reproduction and development as evolvable processes rather than single events.
+  [MIT Press](https://direct.mit.edu/artl/article/31/1/31/127798/)
+- *Emergence of Organisms* — theoretical treatment of how proto-cells, multicellular organisms and
+  increasingly complex organisation can emerge rather than being explicitly represented.
+  [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC7597334/)
 - Moreno et al. (2022), *Exploring Evolved Multicellular Life Histories in an Open-Ended Digital
   Evolution System* — observed emergence of division of labour, resource sharing, offspring
   investment, cell–cell communication, morphological patterning, adaptive apoptosis, and transitions
-  to multicellular individuality. [Frontiers](https://www.frontiersin.org/journals/ecology-and-evolution/articles/10.3389/fevo.2022.750837/full)
-- The most promising direction for making functional **organs** emerge instead of hardcoding
-  "stomach = X".
+  to multicellular individuality. The most promising route to making functional **organs** emerge
+  instead of hardcoding "stomach = X".
+  [Frontiers](https://www.frontiersin.org/journals/ecology-and-evolution/articles/10.3389/fevo.2022.750837/full)
 
-**7. Predation → morphological evolution (real biology, for plausible selection pressures)**
+#### B. Behavioural ecology
+*Territoriality, mating strategies, parental care, offspring protection, dominance, cooperation.*
+
+- [Territorial Dynamics and Stable Home Range Formation for Central Place Foragers](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0034033) — PLOS One
+- [A mechanistic, stigmergy model of territory formation in solitary animals](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7289346/)
+- [Home range formation in wolves due to scent marking](https://link.springer.com/article/10.1006/bulm.2001.0273) — Bulletin of Mathematical Biology
+- [The integrated role of resource memory and scent-based territoriality in the emergence of home-ranges](https://www.biorxiv.org/content/10.1101/2021.05.07.443202.full.pdf)
+- [How memory of direct animal interactions can lead to territorial pattern formation](https://royalsocietypublishing.org/rsif/article/13/118/20160059/64678/) — J. R. Soc. Interface
+- [Territoriality modulates the effect of conspecific encounters on foraging behaviours of a mammalian predator](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11885166/)
 - Cairns et al. (2020), *Evolution in interacting species alters predator life-history traits,
-  behaviour and morphology in experimental microbial communities* — ~600 generations; predators evolve
-  changes in **size, speed and movement directionality**. [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC7341940/)
+  behaviour and morphology in experimental microbial communities* — ~600 generations of real
+  experimental evolution; predators evolve changes in **size, speed and movement directionality**.
+  A source of plausible selection pressures rather than invented fitness functions.
+  [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC7341940/)
 
-**8. Predation ↔ development ↔ morphology**
+#### C. Predator–prey coevolution
+*Hunting, ambush, baiting, camouflage, pursuit, escape, defensive morphology.*
+
+- Ito et al., *Population and Evolutionary Dynamics based on Predator-Prey Relationships in a 3D
+  Physical Simulation* — evolvable morphology *and* behaviour in a physical world; observes long
+  evolutionary cycles from coevolving defensive strategies.
+  [PubMed](https://pubmed.ncbi.nlm.nih.gov/26934093/)
+- Ito, Pilat, Suzuki & Arita (ECAL 2015), *Evolutionary change precedes extinction in
+  eco-evolutionary dynamics based on a 3D virtual predator-prey system*.
+  [Link](https://www.cs.york.ac.uk/nature/ecal2015/paper-147.html)
+- Craig Reynolds (2025), *Camouflage From Coevolution of Predator and Prey* — prey evolve camouflage
+  while predators evolve perception **and learn within their lifetime**. The closest published
+  precedent for the planned GPU-trained brain: lifetime learning alongside evolution.
+  [MIT Press](https://direct.mit.edu/artl/article/31/2/153/130573/)
+- *Evolution of Swarming Behavior Is Shaped by How Predators Attack* (Artificial Life, 2016) — *how*
+  a predator attacks determines which prey behaviours evolve; grouping, selfish-herd effects and
+  collective defence. [MIT Press](https://direct.mit.edu/artl/article/22/3/299/2845/)
+- *Complex eco-evolutionary dynamics induced by the coevolution of predator–prey movement strategies*
+  (2021). [Springer](https://doi.org/10.1007/s10682-021-10140-x)
 - *Hidden paths to endless forms most wonderful: ecology latently shapes evolution of multicellular
   development in predatory bacteria* (2022) — prey type and environment alter developmental and
   morphological evolution **even when those traits are not directly selected**. A caution against
-  assuming fitness must directly select morphology. [Nature Comms Biology](https://www.nature.com/articles/s42003-022-03912-w)
+  assuming fitness must directly select morphology.
+  [Nature Comms Biology](https://www.nature.com/articles/s42003-022-03912-w)
 
-**9. Predator/prey coevolution**
-- *Complex eco-evolutionary dynamics induced by the coevolution of predator–prey movement strategies*
-  (2021). [Springer](https://doi.org/10.1007/s10682-021-10140-x)
-- Craig Reynolds (2025), *Camouflage From Coevolution of Predator and Prey* — prey evolve camouflage
-  while predators evolve perception **and learn within their lifetime**. Directly relevant to the
-  planned GPU-trained brain, which is exactly lifetime learning alongside evolution. [MIT Press](https://direct.mit.edu/artl/article/31/2/153/130573/)
+#### D. Niche construction and environmental modification
+*Digging, burrowing, nest building, dams, traps, territorial marking, food caches, shelters.*
 
-**10. Open-ended evolution**
+**This is the highest-value direction for this engine.** If organisms can modify the environment,
+then digging, nest building, trap making, territory marking and caching need not be separate
+programmed behaviours. They all reduce to one primitive:
+
+> organism modifies environment → environment changes the fitness landscape → selection favours
+> organisms that exploit that modification.
+
+The engine already contains three unconnected instances of this primitive — pheromone trails,
+territory scent marks, and sand digging — without ever having treated them as one mechanism.
+Generalising it is probably the single most promising route to open-ended complexity here.
+
+- *What Is Artificial Life Today, and Where Should It Go?* (Artificial Life, 2024) — environmental
+  construction and modification, ecological niches, emergent ecosystem interactions, and eusocial
+  nest construction as complexity emerging from local interactions.
+  [MIT Press](https://direct.mit.edu/artl/article/30/1/1/120293/)
+
+#### E. Collective behaviour and stigmergy
+*Colonies, swarms, coordinated hunting, collective defence, communication without central control.*
+
+- Connelly, McKinley & Beckmann (2009), *Evolving Cooperative Pheromone Usage in Digital Organisms* —
+  digital organisms evolve pheromone use to coordinate movement; cooperative strategies **emerge**
+  rather than being scripted. The most directly relevant single paper for this engine's chemical
+  fields. [PDF](https://citeseerx.ist.psu.edu/document?doi=34929424598cf8b708f158311062d8db28e8c4fa&repid=rep1&type=pdf)
+- Search terms: *digital organisms pheromone*, *evolved chemical communication*, *evolutionary
+  stigmergy*, *pheromone-based collective behavior artificial life*.
+
+#### F. Whole systems, evolved behaviour, and open-endedness
+
+- **Framsticks** — genotype → physical morphology + control system, with evolution, coevolution,
+  multiple populations, species and ecosystems. One of the most relevant complete architectures.
+  [framsticks.com](https://www.framsticks.com/) ·
+  [Komosinski & Ulatowski (1998)](https://www.framsticks.com/files/common/Komosinski_Framsticks_ECML1998.pdf) ·
+  [resources](https://www.framsticks.com/node/343)
+- *The Surprising Creativity of Digital Evolution* (Artificial Life, 2020) — anecdote collection;
+  Tierra alone produced parasitism, immunity, hyperparasitism, cheating and obligate sociality.
+  Useful both as inspiration and as a warning about how readily evolution exploits engine bugs.
+  [MIT Press](https://direct.mit.edu/artl/article/26/2/274/93255/)
+- *A Case Study of the De Novo Evolution of a Complex Odometric Behavior in Digital Organisms* —
+  digital organisms evolved genuine internal odometry that nobody programmed.
+  [PLOS One](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0060466)
+- *Evolutionary Developmental Robotics: Improving Morphology and Control of Physical Robots*
+  (Artificial Life, 2017) — different body morphologies produce distinct emergent gaits.
+  [MIT Press](https://direct.mit.edu/artl/article/23/2/169/2866/)
+- *Evolutionary Robotics* — ALife encyclopedia entry; a good entry point into evolved locomotion and
+  morphology. [alife.org](https://alife.org/encyclopedia/introduction/evolutionary-robotics/)
+- *Evolutionary Robotics and Morphological Design* — overview of jointly evolving morphology and
+  behaviour. [Nature Index](https://www.nature.com/nature-index/topics/l4/evolutionary-robotics-and-morphological-design)
 - *The MODES Toolbox: Measurements of Open-Ended Dynamics in Evolving Systems* (2019) — metrics for
-  novelty, complexity, ecological and change potential. Useful for actually *measuring* whether the
-  simulation grows more complex rather than merely accumulating features. [MIT Press](https://direct.mit.edu/artl/article/25/1/50/2915/)
+  novelty, complexity, ecological and change potential. For actually *measuring* whether the
+  simulation grows more complex rather than merely accumulating features.
+  [MIT Press](https://direct.mit.edu/artl/article/25/1/50/2915/)
 - *Open-Endedness for the Sake of Open-Endedness* (2019) — why piling on more mechanisms does **not**
-  necessarily produce open-ended evolution. [MIT Press](https://direct.mit.edu/artl/article/25/2/198/2923/)
+  necessarily produce open-ended evolution. Worth taking seriously here.
+  [MIT Press](https://direct.mit.edu/artl/article/25/2/198/2923/)
 
-> Guidance attached to this list: do not limit the search to ALife systems. Eco-evolution,
-> experimental predator/prey evolution, stigmergy, evo-devo, transitions in individuality, and
-> microbial evolution are probably richer sources of transposable mechanisms.
+> Do not limit the search to ALife systems. Evolutionary robotics, evo-devo, behavioural ecology,
+> theoretical ecology, experimental predator/prey evolution, transitions in individuality and
+> microbial evolution have all studied these mechanisms in isolation, often in more transposable form.
