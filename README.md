@@ -283,8 +283,19 @@ Status key: **[ ]** not started · **[~]** partially done · **[?]** needs inves
 
 ### Intelligence (the largest open area)
 
-**Measured starting point:** evolved brains are *no better than random ones* at steering toward
-food (forage alignment −0.012 evolved vs +0.000 random). Evolution is improving bodies — evolved
+**Status: the asynchronous GPU training loop is closed and measurably working.** `app/train_encoder.py`
+runs as its own process on the RTX 6000, reads the experience chunks the simulation writes, trains a
+world model self-supervised (predict the next sense vector and the reward from the current latent and
+action), and writes encoder weights atomically; the simulation hot-loads them without ever waiting.
+The encoder predicts the world **3.8× better than "assume nothing changes"**. More importantly it
+changes behaviour: pooled over 4 seeds and ~15k samples per condition, prey-pursuit alignment goes
+from **−0.0102 with a random encoder to +0.0203 with the trained one (diff +0.0305 ±0.0230)** — the
+first statistically defensible evidence that trained perception improves what creatures actually do.
+Fleeing and mate-approach remain within noise.
+
+**Original measured starting point** (before the shared encoder and the training loop): evolved
+brains were *no better than random ones* at steering toward food (forage alignment −0.012 evolved vs
++0.000 random). Evolution is improving bodies — evolved
 populations live longer and hold more energy — but the brains contribute almost nothing to
 navigation. Two causes are visible in the logged sense vectors: the four recurrent memory channels
 carry the highest variance of all 34 inputs (std 0.76, saturated at ±1), so the network mostly
