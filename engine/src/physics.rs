@@ -1131,7 +1131,20 @@ pub fn tick(world: &mut World) {
         if !drag_hits_rock {
             world.individuals.root_pos[target] = dragged;
         }
-        let drain = world.individuals.energy[target].max(0.0).min(0.4);
+        // Draining a held victim is EATING, so it needs a mouth like every
+        // other way of eating. Gating only the biting path left this one wide
+        // open: an animal with no mouth at all could still grapple something
+        // and siphon it to death, and since that is how most kills actually
+        // happen, mouths stayed nearly worthless -- measured at 2.1% of
+        // tissue on the live world while predation accounted for 18562 of
+        // 19997 deaths. A mouthless animal can still hold on and still fight,
+        // it just cannot feed on what it is holding.
+        let mouths = world.individuals.part_counts[slot][crate::pixels::PART_MOUTH as usize];
+        let drain = if mouths > 0 {
+            world.individuals.energy[target].max(0.0).min(0.4)
+        } else {
+            0.0
+        };
         world.individuals.energy[target] -= drain;
         world.individuals.energy[slot] += drain;
         // A captured target is EXCLUDED from the main `deciding` loop's own

@@ -1434,6 +1434,15 @@ impl World {
 
     /// Test-only: overrides per-part upkeep, indexed body, eye, mouth, gut,
     /// tentacle, armor, flipper.
+    /// Test-only: scales the whole metabolic economy. This is the lever on
+    /// POPULATION rather than on body size: with upkeep sublinear in size, a
+    /// higher multiplier hurts small animals disproportionately, because they
+    /// pay near the full per-part rate while a large body pays a fraction of
+    /// it. So it should thin the world out without flattening the animals.
+    fn debug_set_metabolism_multiplier(&mut self, v: f32) {
+        self.metabolism_multiplier = v;
+    }
+
     fn debug_set_part_metabolism(&mut self, v: Vec<f32>) {
         for (i, x) in v.iter().take(7).enumerate() {
             self.part_metabolism[i] = *x;

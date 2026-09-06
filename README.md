@@ -332,8 +332,31 @@ deepest -- a slightly further but much fatter part can be penetrating while the 
 a heavy body never wins. Fixed by searching each body's real reach, testing every component pair
 (which costs nothing extra, since the inner scan already ran over all of the other body's parts),
 and adding direct positional correction of a fraction of the penetration per tick, mass-weighted so
-the lighter animal yields more. Measured before the fix: **70% of all components were sitting inside
-another animal's component**, at 62-75 ticks/s.
+the lighter animal yields more. Measuring it correctly took a second attempt. The raw "what fraction of components sit inside
+another animal's component" figure is confounded by density, and badly: raising collision stiffness
+twelvefold drove overlap from 56% to 95%, which looks like a catastrophic regression and is nothing
+of the kind -- the same change doubled the population, and denser worlds overlap more whatever the
+solver does. Scoring against a null model (the same bodies, each rigidly displaced to a random
+position, preserving its own shape) gives a density-controlled ratio:
+
+| solver | overlap vs random placement | population |
+|---|---|---|
+| force only (the original) | **1.46** | 401-903 |
+| stiffness x12, no correction | 0.98 | 1667-1929 |
+| positional correction | **0.99** | 1272-1658 |
+
+So the original solver left bodies clumping about 46% *more* than chance, and both fixes remove
+that entirely. Contact resolution now works.
+
+It also revealed a genuine trade-off that no amount of solver work removes. Keeping bodies apart
+roughly **doubled the population**, because 93% of deaths here are predation and anything that
+stops bodies interpenetrating also stops predators reaching their prey. The world therefore still
+*reads* as crowded even though the physics is correct: at twenty thousand components in a 240x240
+world, overlap is unavoidable and a ratio of 1.0 is the floor. Crowding is now a density problem,
+not a collision problem, and the lever for it is the metabolic economy rather than the solver.
+
+Cost: 26-36 ticks/s at 12000-22000 components, against 51-83 ticks/s at 2500-12000. Most of that
+is simply more animals to simulate.
 
 ---
 
