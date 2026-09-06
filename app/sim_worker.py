@@ -44,7 +44,12 @@ WORLD_SIZE = 240  # was 160 -- a real "bigger, more diverse world": 2.25x the ar
 # and a crowded world of small fast breeders out-competed anything complex --
 # creatures ended up as 3-part worms with no organs, just turning in place and
 # reproducing. Foraging only means something if food can actually be used up.
-FOOD_REGROW_RATE = 0.006
+# Moderated from 0.006 after an 18000-tick sweep: at that rate BOTH test
+# seeds collapsed to a handful of individuals, so while the live world happened
+# to survive it, the setting is a coin flip. Half the original rate keeps
+# foraging meaningful -- a grazed patch does deplete and travelling between
+# them matters -- without making extinction the default outcome.
+FOOD_REGROW_RATE = 0.015
 FOOD_PATCHES = 50  # was 25
 POP_CAP = 6000  # was 4000
 FOUNDER_COUNT = 300  # was 160 -- a bigger world needs more founders to avoid the Allee effect -- the new,
