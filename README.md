@@ -489,9 +489,12 @@ brains performed no better than random ones.
   but the owner wants fewer, larger animals still.
 - **[ ] Creatures should not stack on each other.** Contact now scales with real part size, but
   crowding at high density is not solved.
-- **[?] Are reproductive anomalies (mutations) well diversified?** Raised by the owner and **not
-  yet investigated** — the mutation model may be too narrow to generate real morphological
-  variety.
+- **[x] Are reproductive anomalies (mutations) well diversified?** Investigated and the answer is
+  yes. Counting distinct body TOPOLOGIES (branching profile, depth profile and organ composition,
+  so trivial coordinate differences don't inflate the count): roughly **three quarters of creatures
+  have a unique body plan**, distinct plans rise from 393 to 759 over 6000 ticks, and no single
+  plan ever exceeds ~2.5% of the population. Morphology is genuinely exploring; mutation is not
+  the bottleneck.
 
 ### Bodies and structure
 
