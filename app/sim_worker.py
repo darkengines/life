@@ -39,6 +39,12 @@ WORLD_SIZE = 240  # was 160 -- a real "bigger, more diverse world": 2.25x the ar
                   # session's real, measured performance headroom (tick/publish decoupling +
                   # the O(4ms)/tick engine cost leave plenty of room before a bigger field
                   # grid or spatial structure become the bottleneck).
+# Food grows far more slowly than it used to. At 0.03 a grazed cell refilled
+# almost immediately, so a patch never ran out, sitting still beat travelling,
+# and a crowded world of small fast breeders out-competed anything complex --
+# creatures ended up as 3-part worms with no organs, just turning in place and
+# reproducing. Foraging only means something if food can actually be used up.
+FOOD_REGROW_RATE = 0.006
 FOOD_PATCHES = 50  # was 25
 POP_CAP = 6000  # was 4000
 FOUNDER_COUNT = 300  # was 160 -- a bigger world needs more founders to avoid the Allee effect -- the new,
@@ -220,7 +226,7 @@ def update_chronicle(alive, tick_count, weather):
 
 
 def _new_world():
-    world = rust_world.World(WORLD_SIZE, 0.03, 1.0, POP_CAP, None, FOOD_PATCHES)
+    world = rust_world.World(WORLD_SIZE, FOOD_REGROW_RATE, 1.0, POP_CAP, None, FOOD_PATCHES)
     world.spawn_random(FOUNDER_COUNT)
     return world
 

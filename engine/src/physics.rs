@@ -647,7 +647,7 @@ fn kill(world: &mut World, slot: usize) {
         root_pos: root,
         local_shape,
         color: world.individuals.color[slot],
-        energy: crate::CORPSE_ENERGY_PER_PIXEL * count as f32,
+        energy: world.meal_energy_per_part * count as f32,
     });
     world.individuals.free_slot(slot);
     world.deaths += 1;
@@ -712,6 +712,20 @@ fn mate_and_crowding(world: &World, slot: usize, grid: &SpatialGrid) -> (bool, u
         }
         if found_mate { continue; }
         if world.individuals.female[other] == my_female { continue; }
+        // Female choice. A female only accepts a partner carrying real
+        // reserves, so energy becomes a display of condition rather than a
+        // private buffer: males that merely survive do not breed, males that
+        // are actually thriving do. This is sexual selection, one of the
+        // strongest directional forces in real evolution. Without it, any
+        // creature that manages to stay alive beside another reproduces
+        // regardless of how well it is doing -- which is most of why a
+        // crowded world fills with indistinguishable small breeders.
+        if my_female
+            && world.individuals.energy[other]
+                < world.individuals.energy[slot] * crate::MATE_CHOICE_ENERGY_RATIO
+        {
+            continue;
+        }
         let other_mature = world.individuals.age[other] as f32 >= crate::MATURITY_AGE * world.maturity_multiplier;
         if !other_mature { continue; }
         let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= gestation_ticks(world, other);
@@ -902,7 +916,7 @@ pub fn tick(world: &mut World) {
                     let (hx, hy) = grid_xy(world, world.individuals.root_pos[target]);
                     let idx = (hx * world.size + hy) as usize;
                     let died = remove_pixel(world, target, victim);
-                    world.individuals.energy[slot] += crate::CORPSE_ENERGY_PER_PIXEL * digestion_multiplier(world, slot);
+                    world.individuals.energy[slot] += world.meal_energy_per_part * digestion_multiplier(world, slot);
                     world.fields.blood[idx] += crate::BLOOD_EMIT_ON_HIT;
                     if died {
                         kill(world, target);
@@ -1733,7 +1747,7 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
                 let (ex, ey) = grid_xy(world, world.individuals.root_pos[other]);
                 let eidx = (ex * world.size + ey) as usize;
                 let meal = world.individuals.pixel_count[other] as f32
-                    * crate::CORPSE_ENERGY_PER_PIXEL
+                    * world.meal_energy_per_part
                     * crate::ENGULF_EFFICIENCY
                     * digestion_multiplier(world, slot);
                 world.individuals.energy[slot] += meal;

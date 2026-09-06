@@ -513,6 +513,55 @@ pub fn distill_policy(
 /// the root to the centroid of all its parts. Must be recomputed whenever the
 /// body plan changes, since growing a limb to one side moves the centre of
 /// mass and therefore what "forwards" means for this animal.
+/// Removes one LEAF part (a part with no children), keeping the body a
+/// connected tree. Used by birth anomalies so lineages can shed structure as
+/// well as gain it.
+pub fn remove_leaf(individuals: &mut Individuals, pixels: &mut PixelArena, slot: usize, victim: u32) {
+    let offset = individuals.pixel_offset[slot];
+    let count = individuals.pixel_count[slot];
+    if count <= 1 || victim == 0 || victim >= count {
+        return;
+    }
+    let new_offset = pixels.allocate(count - 1);
+    let mut w = 0usize;
+    let mut remap = vec![-1i32; count as usize];
+    for k in 0..count as usize {
+        if k as u32 == victim {
+            continue;
+        }
+        remap[k] = w as i32;
+        let (src, dst) = (offset as usize + k, new_offset as usize + w);
+        pixels.rest_angle[dst] = pixels.rest_angle[src];
+        pixels.flex[dst] = pixels.flex[src];
+        pixels.memory[dst] = pixels.memory[src];
+        pixels.storage[dst] = pixels.storage[src];
+        pixels.size[dst] = pixels.size[src];
+        pixels.min_angle[dst] = pixels.min_angle[src];
+        pixels.max_angle[dst] = pixels.max_angle[src];
+        pixels.health[dst] = pixels.health[src];
+        pixels.part_type[dst] = pixels.part_type[src];
+        pixels.symmetric[dst] = pixels.symmetric[src];
+        pixels.mirror_sign[dst] = pixels.mirror_sign[src];
+        w += 1;
+    }
+    // re-point parents through the remap
+    w = 0;
+    for k in 0..count as usize {
+        if k as u32 == victim {
+            continue;
+        }
+        let old_parent = pixels.parent_idx[offset as usize + k];
+        pixels.parent_idx[new_offset as usize + w] =
+            if old_parent < 0 { -1 } else { remap[old_parent as usize] };
+        w += 1;
+    }
+    pixels.free(offset, count);
+    individuals.pixel_offset[slot] = new_offset;
+    individuals.pixel_count[slot] = count - 1;
+    recompute_part_counts(individuals, pixels, slot);
+    recompute_axis_offset(individuals, pixels, slot);
+}
+
 pub fn recompute_axis_offset(individuals: &mut Individuals, pixels: &PixelArena, slot: usize) {
     let offset = individuals.pixel_offset[slot];
     let count = individuals.pixel_count[slot];
@@ -867,7 +916,38 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
 
     recompute_part_counts(individuals, pixels, child);
     recompute_axis_offset(individuals, pixels, child);
-    grow_one_pixel_weighted(individuals, pixels, rng, child, tip_weight); // one body-plan variation at birth
+    // Birth anomalies: the body plan can gain a part, gain a small burst of
+    // them, or LOSE one. Only ever appending meant morphology crept outward in
+    // unit steps and could never simplify, so shapes could not really explore.
+    if rng.random::<f32>() < crate::ANOMALY_LOSE_PART_CHANCE
+        && individuals.pixel_count[child] > 2
+    {
+        // Shed a leaf part (one with no children), so the body stays a
+        // connected tree rather than losing a whole branch it was carrying.
+        let off = individuals.pixel_offset[child] as usize;
+        let n = individuals.pixel_count[child] as usize;
+        let mut has_child = vec![false; n];
+        for k in 0..n {
+            let par = pixels.parent_idx[off + k];
+            if par >= 0 {
+                has_child[par as usize] = true;
+            }
+        }
+        let leaves: Vec<usize> = (1..n).filter(|&k| !has_child[k]).collect();
+        if !leaves.is_empty() {
+            let victim = leaves[rng.random_range(0..leaves.len())];
+            remove_leaf(individuals, pixels, child, victim as u32);
+        }
+    } else {
+        let burst = if rng.random::<f32>() < crate::ANOMALY_BURST_CHANCE {
+            rng.random_range(2..=crate::ANOMALY_BURST_MAX)
+        } else {
+            1
+        };
+        for _ in 0..burst {
+            grow_one_pixel_weighted(individuals, pixels, rng, child, tip_weight);
+        }
+    }
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to
     individuals.ticks_since_fed[child] = 0;

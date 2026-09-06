@@ -52,6 +52,19 @@ pub const MATURITY_AGE: f32 = 60.0;
 // the real cause of a population-wide reproduction collapse (energy was
 // never the limiting factor; individuals were just too spread out to meet).
 pub const MATE_RADIUS: f32 = 20.0;
+// How much energy a male must carry, relative to the female's own, to be
+// accepted. Sexual selection: energy becomes a display of condition rather
+// than a private buffer, so merely surviving is no longer enough to breed.
+pub const MATE_CHOICE_ENERGY_RATIO: f32 = 0.8;
+// Birth anomalies. Reproduction used to do exactly one thing to the body plan
+// -- append a single part -- so morphology could only ever creep outward one
+// step at a time and could never simplify. Real developmental variation both
+// adds and removes structure, and sometimes in more than unit steps. A lineage
+// that can shed a useless limb, or gain a small cluster at once, explores a
+// far wider space of shapes.
+pub const ANOMALY_LOSE_PART_CHANCE: f32 = 0.10;
+pub const ANOMALY_BURST_CHANCE: f32 = 0.12;
+pub const ANOMALY_BURST_MAX: u32 = 3;
 pub const BASE_METABOLISM: f32 = 0.02;
 pub const PER_PIXEL_METABOLISM: f32 = 0.015;
 pub const EAT_RATE: f32 = 2.0;
@@ -680,6 +693,10 @@ pub struct World {
     /// starts as an exact copy of the learned policy, which isolates
     /// 'is the policy any good' from 'is the distillation strong enough'.
     pub policy_distill_rate: f32,
+    /// Runtime-overridable CORPSE_ENERGY_PER_PIXEL. This is the price of a
+    /// meal, and therefore whether being a predator can pay for a large
+    /// body at all.
+    pub meal_energy_per_part: f32,
     /// Runtime-overridable GRAVITY, so locomotion can be probed in
     /// isolation without sinking confounding the measurement.
     pub gravity: f32,
@@ -758,6 +775,7 @@ impl World {
             freeze_locomotion: None,
             angular_damping: ANGULAR_DAMPING,
             policy_distill_rate: POLICY_DISTILL_RATE,
+            meal_energy_per_part: CORPSE_ENERGY_PER_PIXEL,
             gravity: GRAVITY,
             shared_enc_w,
             shared_enc_b,
@@ -1220,6 +1238,9 @@ impl World {
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
     }
+
+    /// Test-only: overrides the energy a meal yields per part of prey.
+    fn debug_set_meal_energy(&mut self, v: f32) { self.meal_energy_per_part = v; }
 
     /// Test-only: overrides how hard learned instinct is pressed into newborns.
     fn debug_set_policy_distill_rate(&mut self, v: f32) { self.policy_distill_rate = v; }
