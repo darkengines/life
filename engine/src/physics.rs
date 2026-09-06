@@ -1193,6 +1193,14 @@ pub fn tick(world: &mut World) {
                 world.individuals.pending_reward[slot] += crate::REWARD_REPRODUCE;
                 world.individuals.ticks_since_reproduced[slot] = 0;
                 let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot);
+                // Inherited instinct: pull the newborn's decisions part-way
+                // toward what the GPU has learned works, then let evolution
+                // take it from there.
+                if let Some(policy) = world.shared_policy.take() {
+                    crate::individuals::distill_policy(
+                        &mut world.individuals, child, &policy, crate::POLICY_DISTILL_RATE);
+                    world.shared_policy = Some(policy);
+                }
                 // A child's root_pos is parent_pos + small random offset,
                 // with no terrain awareness -- if that offset (or the
                 // child's own body extending from it) lands inside rock,

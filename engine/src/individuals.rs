@@ -273,19 +273,19 @@ impl Individuals {
         self.free_slots.push(slot);
     }
 
-    fn brain_w1_mut(&mut self, slot: usize) -> &mut [f32] {
+    pub fn brain_w1_mut(&mut self, slot: usize) -> &mut [f32] {
         let s = slot * HIDDEN_DIM * LATENT_DIM;
         &mut self.brain_w1[s..s + HIDDEN_DIM * LATENT_DIM]
     }
-    fn brain_b1_mut(&mut self, slot: usize) -> &mut [f32] {
+    pub fn brain_b1_mut(&mut self, slot: usize) -> &mut [f32] {
         let s = slot * HIDDEN_DIM;
         &mut self.brain_b1[s..s + HIDDEN_DIM]
     }
-    fn brain_w2_mut(&mut self, slot: usize) -> &mut [f32] {
+    pub fn brain_w2_mut(&mut self, slot: usize) -> &mut [f32] {
         let s = slot * ACT_DIM * HIDDEN_DIM;
         &mut self.brain_w2[s..s + ACT_DIM * HIDDEN_DIM]
     }
-    fn brain_b2_mut(&mut self, slot: usize) -> &mut [f32] {
+    pub fn brain_b2_mut(&mut self, slot: usize) -> &mut [f32] {
         let s = slot * ACT_DIM;
         &mut self.brain_b2[s..s + ACT_DIM]
     }
@@ -424,6 +424,35 @@ fn dir_to_angle(d: (i32, i32)) -> f32 {
 /// anything that changes its pixels: birth, growth, or losing a part in
 /// combat. Cheap (bodies are tens of pixels at most) and rare, which is the
 /// entire reason the counts are cached rather than derived per tick.
+/// Nudges an individual's decoder toward the learned baseline policy.
+///
+/// This is how GPU learning reaches the population: not by overwriting minds,
+/// but by shifting what a newborn STARTS from, the way instinct is inherited.
+/// The blend is partial and mutation still applies afterwards, so individual
+/// variation -- the raw material selection works on -- is preserved rather
+/// than collapsed onto one shared behaviour.
+pub fn distill_policy(
+    individuals: &mut Individuals,
+    slot: usize,
+    policy: &(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>),
+    rate: f32,
+) {
+    let (pw1, pb1, pw2, pb2) = policy;
+    let k = rate.clamp(0.0, 1.0);
+    for (dst, src) in individuals.brain_w1_mut(slot).iter_mut().zip(pw1.iter()) {
+        *dst += (*src - *dst) * k;
+    }
+    for (dst, src) in individuals.brain_b1_mut(slot).iter_mut().zip(pb1.iter()) {
+        *dst += (*src - *dst) * k;
+    }
+    for (dst, src) in individuals.brain_w2_mut(slot).iter_mut().zip(pw2.iter()) {
+        *dst += (*src - *dst) * k;
+    }
+    for (dst, src) in individuals.brain_b2_mut(slot).iter_mut().zip(pb2.iter()) {
+        *dst += (*src - *dst) * k;
+    }
+}
+
 pub fn recompute_part_counts(individuals: &mut Individuals, pixels: &PixelArena, slot: usize) {
     let offset = individuals.pixel_offset[slot] as usize;
     let count = individuals.pixel_count[slot] as usize;

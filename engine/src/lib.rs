@@ -493,6 +493,11 @@ pub const BREEDING_SAFETY_BLOOD_MAX: f32 = 0.35;
 // Credited to an individual the moment it successfully reproduces, for
 // the experience log the future replay training will consume.
 pub const REWARD_REPRODUCE: f32 = 1.0;
+// How far a newborn's decoder is pulled toward the learned baseline policy.
+// Deliberately partial: at 1.0 every creature would start identical and the
+// variation selection needs would be gone, which would trade evolution away
+// for learning instead of combining them.
+pub const POLICY_DISTILL_RATE: f32 = 0.25;
 
 pub const WEATHER_TRIGGER_CHANCE: f64 = 0.0006;
 
@@ -595,6 +600,14 @@ pub struct World {
     // without any of them losing their own evolved decision-making.
     pub shared_enc_w: Vec<f32>,
     pub shared_enc_b: Vec<f32>,
+
+    // A baseline decision policy learned on the GPU from the population's own
+    // successful behaviour, in exactly the shape of an individual's decoder.
+    // Newborns are nudged toward it at birth and then evolve away from it, so
+    // learning reaches the population the way instinct does -- through births
+    // -- while every individual still owns and mutates its own decisions.
+    // None until the trainer has produced one; the world runs fine without.
+    pub shared_policy: Option<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)>,
 }
 
 #[pymethods]
@@ -644,6 +657,7 @@ impl World {
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
             shared_enc_w,
             shared_enc_b,
+            shared_policy: None,
         }
     }
 
@@ -1068,6 +1082,17 @@ impl World {
         }
         self.shared_enc_w = w;
         self.shared_enc_b = b;
+        true
+    }
+
+    /// Installs a learned baseline policy. Shapes must match an individual's
+    /// decoder exactly, since that is what it gets blended into.
+    fn set_shared_policy(&mut self, w1: Vec<f32>, b1: Vec<f32>, w2: Vec<f32>, b2: Vec<f32>) -> bool {
+        let (h, l, a) = (individuals::HIDDEN_DIM, individuals::LATENT_DIM, individuals::ACT_DIM);
+        if w1.len() != h * l || b1.len() != h || w2.len() != a * h || b2.len() != a {
+            return false;
+        }
+        self.shared_policy = Some((w1, b1, w2, b2));
         true
     }
 

@@ -330,8 +330,15 @@ def _maybe_load_encoder(world):
         d = np.load(ENCODER_WEIGHTS_PATH)
         ok = world.set_shared_encoder(d["w"].astype(np.float32).tolist(),
                                       d["b"].astype(np.float32).tolist())
-        print(f"[encoder] {'loaded trained weights' if ok else 'rejected weights (shape mismatch)'}",
-              flush=True)
+        msg = "loaded perception" if ok else "rejected perception (shape mismatch)"
+        # The learned baseline policy is optional: older weight files won't
+        # have it, and the world runs perfectly well on evolution alone.
+        if all(k in d.files for k in ("pw1", "pb1", "pw2", "pb2")):
+            pok = world.set_shared_policy(
+                d["pw1"].astype(np.float32).tolist(), d["pb1"].astype(np.float32).tolist(),
+                d["pw2"].astype(np.float32).tolist(), d["pb2"].astype(np.float32).tolist())
+            msg += ", instinct" if pok else ", instinct REJECTED (shape mismatch)"
+        print(f"[encoder] {msg}", flush=True)
     except Exception as e:
         print(f"[encoder] load failed (non-fatal): {e}", flush=True)
 

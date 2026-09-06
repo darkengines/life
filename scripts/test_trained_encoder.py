@@ -94,6 +94,15 @@ def run_seed(seed, use_trained):
                                     d["b"].astype(np.float32).tolist()):
             print("trained weights rejected (shape mismatch)")
             sys.exit(1)
+        # Also install the learned baseline policy, so newborns inherit
+        # instinct during the run. Perception and instinct are the two halves
+        # of what the GPU produces; testing only the first understates it.
+        if all(k in d.files for k in ("pw1", "pb1", "pw2", "pb2")):
+            if not w.set_shared_policy(
+                    d["pw1"].astype(np.float32).tolist(), d["pb1"].astype(np.float32).tolist(),
+                    d["pw2"].astype(np.float32).tolist(), d["pb2"].astype(np.float32).tolist()):
+                print("learned policy rejected (shape mismatch)")
+                sys.exit(1)
     w.spawn_random(300)
     totals = {k: [0.0, 0] for k in KINDS}
     for t in range(1, TICKS + 1):
@@ -112,7 +121,7 @@ if not WEIGHTS.exists():
     print("no trained weights on disk yet -- run app/train_encoder.py first")
     sys.exit(1)
 
-print("Random vs GPU-trained shared perception encoder")
+print("Evolution alone vs evolution + GPU-trained perception and instinct")
 print(f"seeds={SEEDS}, sampled every {SAMPLE_EVERY} ticks after tick {WARMUP}\n")
 
 results = {}

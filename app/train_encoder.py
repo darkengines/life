@@ -45,16 +45,42 @@ STEPS_PER_ROUND = 400
 BATCH = 4096
 LR = 1e-3
 MIN_ROWS = 4000           # don't bother training on a trickle
+# Train on a RECENT window rather than everything ever logged. The world is
+# not stationary -- bodies get larger, senses come and go as organs evolve,
+# whole strategies rise and fall -- so old transitions describe a world that
+# no longer exists. Measured directly: with an ever-growing buffer the
+# encoder's advantage over the naive baseline decayed round by round
+# (3.8x -> 3.0x -> 2.2x -> 2.0x) as it was forced to fit stale distributions.
+RECENT_CHUNKS = 8
 # Reward is far sparser and larger in scale than the sense vector, so it needs
 # a modest weight or it dominates the representation the encoder learns.
 REWARD_LOSS_WEIGHT = 0.05
+# Reproduction is decisive but fires on ~0.5% of rows; energy change is dense
+# and available on every one. Both feed the learning signal.
+REPRO_SIGNAL_WEIGHT = 5.0
+ENERGY_SIGNAL_SCALE = 0.5
+# Advantage-weighted regression temperature and how hard the policy pulls on
+# the shared representation.
+AWR_TEMPERATURE = 1.0
+POLICY_LOSS_WEIGHT = 0.5
+
+
+HIDDEN_DIM = 12   # must match individuals.rs HIDDEN_DIM
 
 
 class WorldModel(nn.Module):
-    """encoder(sense) -> latent, then predict next sense and reward.
+    """encoder(sense) -> latent, plus prediction heads and a baseline policy.
 
-    Only the encoder is exported to the simulation; the prediction heads
-    exist purely to give the encoder a reason to keep useful information.
+    Two things are exported to the simulation:
+
+    * the ENCODER, which becomes every creature's shared perception;
+    * the POLICY, latent -> action, which newborns inherit as instinct and
+      then evolve away from individually.
+
+    The policy deliberately has exactly the shape of an individual's own
+    decoder (latent -> hidden -> action, tanh throughout), because it has to
+    be installable as one. The prediction heads are internal -- they exist
+    only to give the encoder a reason to retain useful information.
     """
 
     def __init__(self, sense_dim, act_dim, latent_dim):
@@ -71,14 +97,19 @@ class WorldModel(nn.Module):
             nn.Linear(latent_dim + act_dim, 64), nn.ReLU(),
             nn.Linear(64, 1),
         )
+        self.policy_l1 = nn.Linear(latent_dim, HIDDEN_DIM)
+        self.policy_l2 = nn.Linear(HIDDEN_DIM, act_dim)
 
     def forward(self, sense, action):
         z = torch.tanh(self.encoder(sense))
         za = torch.cat([z, action], dim=-1)
         return z, self.predict_next(za), self.predict_reward(za).squeeze(-1)
 
+    def policy(self, z):
+        return torch.tanh(self.policy_l2(torch.tanh(self.policy_l1(z))))
 
-def load_transitions(max_files=40):
+
+def load_transitions(max_files=RECENT_CHUNKS):
     """Consecutive (state, action, reward, next state) tuples.
 
     The engine logs each individual for a short run of CONSECUTIVE ticks, so
@@ -95,14 +126,24 @@ def load_transitions(max_files=40):
         ids, ticks = d["ids"], d["ticks"]
         sense, action = d["sense"], d["action"]
         reward = d["reward"] if "reward" in d.files else np.zeros(len(ids), dtype=np.float32)
+        energy = d["energy"] if "energy" in d.files else np.zeros(len(ids), dtype=np.float32)
         order = np.lexsort((ticks, ids))
         ids, ticks = ids[order], ticks[order]
         sense, action, reward = sense[order], action[order], reward[order]
+        energy = energy[order]
         same = (ids[1:] == ids[:-1]) & (ticks[1:] == ticks[:-1] + 1)
         idx = np.nonzero(same)[0]
         if len(idx):
             S.append(sense[idx]); A.append(action[idx])
-            R.append(reward[idx]); S2.append(sense[idx + 1])
+            S2.append(sense[idx + 1])
+            # Reproduction is the sparse, decisive reward, but on its own it
+            # fires on ~0.5% of rows -- far too rare to shape a policy. The
+            # change in energy across the step is a dense signal available on
+            # every row: gaining energy means the creature just ate, losing it
+            # means it is paying to exist. Combining them gives something
+            # learnable that still treats reproduction as what matters most.
+            denergy = energy[idx + 1] - energy[idx]
+            R.append(reward[idx] * REPRO_SIGNAL_WEIGHT + denergy * ENERGY_SIGNAL_SCALE)
     if not S:
         return None
     return (np.concatenate(S), np.concatenate(A),
@@ -152,19 +193,30 @@ def main():
         S2_t = torch.from_numpy(S2).float().to(dev)
 
         model.train()
-        last_state, last_reward = 0.0, 0.0
+        last_state, last_reward, last_policy = 0.0, 0.0, 0.0
         for step in range(STEPS_PER_ROUND):
             i = torch.randint(0, len(S_t), (min(BATCH, len(S_t)),), device=dev)
             _z, pred_next, pred_r = model(S_t[i], A_t[i])
             state_loss = nn.functional.mse_loss(pred_next, S2_t[i])
             reward_loss = nn.functional.mse_loss(pred_r, R_t[i])
-            loss = state_loss + REWARD_LOSS_WEIGHT * reward_loss
+            # Advantage-weighted regression: imitate the actions that were
+            # actually followed by good outcomes, weighted by how good. This
+            # is deliberately imitation of the population's OWN behaviour
+            # rather than any designed notion of correct play -- it distils
+            # what already works in this world, so it cannot push evolution
+            # toward a strategy the world does not reward.
+            adv = (R_t[i] - R_t[i].mean()) / (R_t[i].std() + 1e-6)
+            wgt = torch.exp(torch.clamp(adv / AWR_TEMPERATURE, -3.0, 3.0)).detach()
+            pol = model.policy(_z.detach())
+            policy_loss = (wgt * ((pol - A_t[i]) ** 2).mean(dim=-1)).mean()
+            loss = state_loss + REWARD_LOSS_WEIGHT * reward_loss + POLICY_LOSS_WEIGHT * policy_loss
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             last_state = float(state_loss.item())
             last_reward = float(reward_loss.item())
+            last_policy = float(policy_loss.item())
 
         # The only honest baseline for the state head is "predict no change".
         # Reporting the COMBINED loss against it was apples-to-oranges: the
@@ -174,21 +226,33 @@ def main():
             naive = float(nn.functional.mse_loss(S_t, S2_t).item())
             reward_var = float(R_t.var().item())
 
-        w = model.encoder.weight.detach().cpu().numpy().astype(np.float32)
-        b = model.encoder.bias.detach().cpu().numpy().astype(np.float32)
+        def cpu(t):
+            return t.detach().cpu().numpy().astype(np.float32)
+
         tmp = WEIGHTS_PATH.with_suffix(".tmp.npz")
-        np.savez(tmp, w=w.reshape(-1), b=b)
+        np.savez(
+            tmp,
+            w=cpu(model.encoder.weight).reshape(-1),
+            b=cpu(model.encoder.bias),
+            # The learned instinct, in exactly an individual decoder's shape.
+            pw1=cpu(model.policy_l1.weight).reshape(-1),
+            pb1=cpu(model.policy_l1.bias),
+            pw2=cpu(model.policy_l2.weight).reshape(-1),
+            pb2=cpu(model.policy_l2.bias),
+        )
         os.replace(tmp, WEIGHTS_PATH)   # atomic, so the sim never reads a half-written file
 
         round_no += 1
         skill = naive / last_state if last_state > 1e-12 else float("inf")
         print(f"[trainer] round {round_no}: {len(S_t)} transitions | "
               f"state {last_state:.6f} vs naive {naive:.6f} ({skill:.2f}x) | "
-              f"reward {last_reward:.5f} vs var {reward_var:.5f} -> weights written",
+              f"reward {last_reward:.5f} vs var {reward_var:.5f} | "
+              f"policy {last_policy:.5f} -> weights written",
               flush=True)
         write_status(state="trained", round=round_no, transitions=int(len(S_t)),
                      state_loss=last_state, naive_loss=naive, skill_vs_naive=skill,
-                     reward_loss=last_reward, reward_var=reward_var, device=dev)
+                     reward_loss=last_reward, reward_var=reward_var,
+                     policy_loss=last_policy, device=dev)
         time.sleep(TRAIN_INTERVAL)
 
 
