@@ -33,7 +33,7 @@ def snapshot(w):
     )
 
 
-PART_NAMES = ["body", "eye", "mouth", "gut", "tentacle", "armor", "flipper"]
+PART_NAMES = ["body", "eye", "mouth", "gut", "tentacle", "armor", "flipper", "filter"]
 
 
 def part_mix(inds):

@@ -31,7 +31,7 @@ W, POP_CAP, REGROW, PATCHES = 240, 6000, 0.015, 50
 TICKS = 18000
 SEEDS = [11, 22, 33]
 
-PART_NAMES = ["body", "eye", "mouth", "gut", "tentacle", "armor", "flipper"]
+PART_NAMES = ["body", "eye", "mouth", "gut", "tentacle", "armor", "flipper", "filter"]
 OLD_METAB = [1.0, 1.4, 1.5, 1.3, 1.5, 1.8, 1.6]
 NEW_METAB = [1.0, 1.15, 1.3, 1.3, 1.5, 1.8, 1.35]
 

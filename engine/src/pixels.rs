@@ -81,7 +81,19 @@ pub const PART_GUT: u8 = 3;
 pub const PART_TENTACLE: u8 = 4;
 pub const PART_ARMOR: u8 = 5;
 pub const PART_FLIPPER: u8 = 6;
-pub const PART_KIND_COUNT: u8 = 7;
+/// A filtering mesh. Grazing yield deliberately falls away as a body gets
+/// heavier, so that large animals are forced to hunt and a real food chain
+/// exists rather than one undifferentiated crowd eating the same thing. But
+/// that rule has no exception, and nature's most conspicuous exception is
+/// exactly the animal it forbids: the enormous filter feeder that lives on
+/// the smallest food in the ocean. A basking shark is not a failed predator.
+/// Filter tissue raises the mass at which grazing stops paying, in proportion
+/// to how much filtering surface the animal carries, which opens a second way
+/// to be large -- graze at scale instead of hunting -- and gives the world a
+/// second trophic strategy to partition rather than one ladder everyone
+/// climbs.
+pub const PART_FILTER: u8 = 7;
+pub const PART_KIND_COUNT: u8 = 8;
 
 /// How thick each organ kind is, as a multiplier on the heritable per-part
 /// `size`. Until now every organ was drawn and collided as the same lump and
@@ -104,6 +116,7 @@ pub const PART_GIRTH: [f32; PART_KIND_COUNT as usize] = [
     0.55, // tentacle: thin
     1.30, // armor: a slab
     1.15, // flipper: broad
+    1.45, // filter: a wide mesh, the largest surface on the animal
 ];
 
 /// How much energy a unit of each tissue can bank. Storage is a property of
@@ -120,6 +133,7 @@ pub const PART_STORAGE: [f32; PART_KIND_COUNT as usize] = [
     0.05, // tentacle
     0.10, // armor
     0.05, // flipper
+    0.00, // filter: a mesh is surface, not larder
 ];
 
 /// The heritable size of a part, scaled by what kind of organ it is. This is

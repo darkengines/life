@@ -77,6 +77,10 @@ pub const EAT_RATE: f32 = 2.0;
 // MEANS something), starvation rises from 11% to 16% of deaths, population
 // stays healthy at 200-360, and genuinely large predators persist.
 pub const GRAZE_MASS_REF: f32 = 30.0;
+/// How much each unit of filter-mesh area raises the mass at which grazing
+/// stops paying. This is the whole point of the organ: it buys the right to
+/// be large AND still live on the food field.
+pub const FILTER_GRAZE_BONUS: f32 = 0.9;
 // A drifting resource mosaic. Blooms open at a new place now and then while
 // standing capacity everywhere slowly fades, so a patch is a temporary thing
 // and a grazer eventually has to go and find the next one.
@@ -154,7 +158,8 @@ pub const CROWDED_NODE_PENALTY: f32 = 0.3;
 // AGAINST (2.1-3.7% of tissue against a ~5% random baseline) while the purely
 // passive gut thrived at 13.9%. A sense organ is not as expensive to carry as
 // a slab of armour.
-pub const PART_METABOLISM: [f32; 7] = [1.0, 1.15, 1.3, 1.3, 1.5, 1.8, 1.35];
+pub const PART_METABOLISM: [f32; crate::pixels::PART_KIND_COUNT as usize] =
+    [1.0, 1.15, 1.3, 1.3, 1.5, 1.8, 1.35, 1.25];
 // Each eye extends how far this individual can see (multiplier on
 // VISION_RANGE), so a blind lump has to bump into the world while an
 // eye-heavy body can track threats and prey at distance -- at a cost.
@@ -519,7 +524,11 @@ pub const DRAG_PERPENDICULAR: f32 = 0.4;
 // water hard when swept; a tentacle is soft and slips through it; armour is a
 // broad plate. This is what makes fins an organ that propels rather than a
 // number that scales.
-pub const PART_DRAG_PERP: [f32; 7] = [1.0, 1.0, 1.0, 1.0, 0.6, 1.5, 3.2];
+// A filter mesh is a broad face held into the flow, so it drags like one --
+// which is a real cost of the strategy, not a free bonus: a filter feeder is
+// slow, and that is why it is a grazer rather than a hunter.
+pub const PART_DRAG_PERP: [f32; crate::pixels::PART_KIND_COUNT as usize] =
+    [1.0, 1.0, 1.0, 1.0, 0.6, 1.5, 3.2, 2.0];
 pub const LINEAR_DAMPING: f32 = 0.25;
 pub const TURN_RATE: f32 = 0.12;
 pub const MAX_SPEED: f32 = 3.0;
@@ -756,7 +765,7 @@ pub struct World {
     /// can be answered by an A/B on one build rather than two.
     pub blind_smell_range: i32,
     pub sight_range_per_eye: i32,
-    pub part_metabolism: [f32; 7],
+    pub part_metabolism: [f32; crate::pixels::PART_KIND_COUNT as usize],
     /// Runtime-overridable METABOLIC_EXPONENT, so the strength of the
     /// large-body energy discount can be swept. 1.0 is the old linear cost.
     pub metabolic_exponent: f32,
@@ -1444,7 +1453,7 @@ impl World {
     }
 
     fn debug_set_part_metabolism(&mut self, v: Vec<f32>) {
-        for (i, x) in v.iter().take(7).enumerate() {
+        for (i, x) in v.iter().take(crate::pixels::PART_KIND_COUNT as usize).enumerate() {
             self.part_metabolism[i] = *x;
         }
     }

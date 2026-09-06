@@ -27,7 +27,7 @@ W, POP_CAP, REGROW, PATCHES = 240, 6000, 0.015, 50
 TICKS = 18000
 SEEDS = [11, 22, 33]
 METAB = [1.0, 1.15, 1.3, 1.3, 1.5, 1.8, 1.35]
-PART_NAMES = ["body", "eye", "mouth", "gut", "tentacle", "armor", "flipper"]
+PART_NAMES = ["body", "eye", "mouth", "gut", "tentacle", "armor", "flipper", "filter"]
 
 BLINDS = [int(a) for a in sys.argv[1:]] or [8, 12, 15, 18]
 

@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use crate::combat;
 use crate::individuals::{ACT_DIM, MEM_DIM, MEMORY_OUT_IDX, SENSE_DIM};
-use crate::spatial::SpatialGrid;
+use crate::spatial::{PartGrid, SpatialGrid};
 use crate::terrain::TerrainKind;
 use crate::{Corpse, ExperienceRow, Weather, World};
 
@@ -880,6 +880,22 @@ fn storage_anchor_position(world: &World, slot: usize, root: [f32; 2]) -> [f32; 
     positions[best_idx]
 }
 
+/// Total area of one kind of tissue on this body, in the same units the
+/// metabolic economy is charged in. Area rather than a part count, because
+/// what a filtering mesh or an armour plate does depends on how much of it
+/// there is, not how many pieces it was grown in.
+pub(crate) fn organ_area(world: &World, slot: usize, kind: u8) -> f32 {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let count = world.individuals.pixel_count[slot] as usize;
+    let mut area = 0.0;
+    for k in 0..count {
+        if world.pixels.part_type[offset + k] != kind { continue; }
+        let g = crate::pixels::girth(&world.pixels, offset + k);
+        area += g * g / crate::PART_AREA_REF;
+    }
+    area * world.individuals.size_scale[slot]
+}
+
 /// How much energy this body can actually hold.
 ///
 /// Built from the evolved per-part `storage` trait and from gut tissue, each
@@ -1064,19 +1080,24 @@ pub fn tick(world: &mut World) {
     // is the mechanical reason they were seen stacking on top of each other,
     // and no amount of crowding cost could fix it, because the overlap was
     // never detected in the first place.
-    let mut body_radius: Vec<f32> = vec![0.0; n];
-    for slot in alive_slots.iter().copied() {
-        if let Some(pos) = &pos_cache[slot] {
-            let root = world.individuals.root_pos[slot];
-            let mut r = 0.0f32;
-            for p in pos {
-                let d = ((p[0] - root[0]).powi(2) + (p[1] - root[1]).powi(2)).sqrt();
-                if d > r { r = d; }
-            }
-            body_radius[slot] = r;
-        }
-    }
-    let max_body_radius = body_radius.iter().copied().fold(0.0f32, f32::max);
+    // Broad phase for contact, over components rather than over animals. See
+    // PartGrid: indexing whole bodies by their root forced every query to be
+    // wide enough to reach the largest animal in the world.
+    let part_grid = PartGrid::build(alive_slots.iter().flat_map(|&slot| {
+        pos_cache[slot]
+            .iter()
+            .flat_map(move |ps| ps.iter().enumerate().map(move |(k, p)| (slot as u32, k as u32, *p)))
+    }));
+    let max_girth = alive_slots
+        .iter()
+        .map(|&slot| {
+            let off = world.individuals.pixel_offset[slot] as usize;
+            let cnt = world.individuals.pixel_count[slot] as usize;
+            (0..cnt)
+                .map(|k| crate::pixels::girth(&world.pixels, off + k) * world.individuals.size_scale[slot])
+                .fold(0.0f32, f32::max)
+        })
+        .fold(0.0f32, f32::max);
     timings.push(("fk_cache", t0.elapsed().as_secs_f64() * 1000.0));
 
     // Attachment: a stuck attacker drags + gradually eats its target.
@@ -1325,7 +1346,7 @@ pub fn tick(world: &mut World) {
             // than rebuilding forward kinematics for it in the sequential
             // phase.
             let (com, moment) = mass_center_and_moment(world, slot, &ind_pos);
-            let (contact, separation) = contact_force(world, slot, &ind_pos, &grid, &pos_cache, &body_radius, max_body_radius);
+            let (contact, separation) = contact_force(world, slot, &ind_pos, &part_grid, &pos_cache, max_girth);
             // Deterministic sampling (no RNG call here -- this closure runs
             // in parallel and must stay a pure function of tick-start
             // state, per the comment above): a modulo on slot+tick spreads
@@ -1641,7 +1662,14 @@ pub fn tick(world: &mut World) {
             // is exactly what was happening -- 96 mean energy with predation
             // optional.
             let graze_mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
-            let graze_efficiency = 1.0 / (1.0 + graze_mass / world.graze_mass_ref);
+            // Filter mesh raises the mass at which grazing stops paying, in
+            // proportion to the filtering surface carried. That is the whole
+            // organ: a second way to be large. Without it the only route to a
+            // big body is hunting, so every large animal in the world is a
+            // predator and there is one trophic ladder instead of a food web.
+            let filter_area = organ_area(world, slot, crate::pixels::PART_FILTER);
+            let graze_ref = world.graze_mass_ref * (1.0 + crate::FILTER_GRAZE_BONUS * filter_area);
+            let graze_efficiency = 1.0 / (1.0 + graze_mass / graze_ref);
             let eaten = world.fields.food[idx].min(crate::EAT_RATE * 0.1);
             world.fields.food[idx] -= eaten;
             world.individuals.energy[slot] +=
@@ -2014,10 +2042,9 @@ fn contact_force(
     world: &World,
     slot: usize,
     ind_pos: &[[f32; 2]],
-    grid: &SpatialGrid,
+    part_grid: &PartGrid,
     pos_cache: &[Option<Vec<[f32; 2]>>],
-    body_radius: &[f32],
-    max_body_radius: f32,
+    max_girth: f32,
 ) -> ([f32; 2], [f32; 2]) {
     let mut push = [0f32; 2];
     // Contact was a pure force: divided by mass, fought by damping, and
@@ -2032,61 +2059,55 @@ fn contact_force(
     // applied to the root once, in the sequential phase.
     let mut separation = [0f32; 2];
     let my_mass = body_size_sum(world, slot).max(0.01) * world.individuals.size_scale[slot];
-    let my_pos = world.individuals.root_pos[slot];
-    let my_radius = body_radius[slot];
     let my_offset = world.individuals.pixel_offset[slot] as usize;
     let my_scale = world.individuals.size_scale[slot];
-    // Search far enough that anything whose body could possibly reach mine is
-    // considered, rather than a fixed three units around the root.
-    for other in grid.nearby_radius(my_pos, my_radius + max_body_radius + crate::COLLISION_RADIUS) {
-        let other = other as usize;
-        if other == slot || !world.individuals.alive[other] { continue; }
-        // Exact broad-phase reject on the two bodies' real reach.
-        if dist(world.individuals.root_pos[other], my_pos)
-            > my_radius + body_radius[other] + crate::COLLISION_RADIUS
-        {
-            continue;
-        }
-        let other_pos = match &pos_cache[other] {
-            Some(p) if p.len() == world.individuals.pixel_count[other] as usize => p,
-            _ => continue,
-        };
-        let other_offset = world.individuals.pixel_offset[other] as usize;
-        let other_scale = world.individuals.size_scale[other];
-        for (pi, &p) in ind_pos.iter().enumerate() {
-            let my_girth = crate::pixels::girth(&world.pixels, my_offset + pi) * my_scale;
-            // EVERY overlapping pair of components pushes, not just the
-            // single nearest one. Taking the nearest part alone was wrong in
-            // two ways: a body lying across another was resolved as though it
-            // touched at one point, and "nearest" is not "deepest" -- a
-            // slightly further but much fatter part can be penetrating while
-            // the closest one is not, so real overlaps were silently ignored.
-            // This costs nothing extra: the inner scan was already over all
-            // of the other body's parts.
-            for (oi, &op) in other_pos.iter().enumerate() {
-                let d = dist(p, op);
-                if d <= 1e-6 { continue; }
-                let reach = crate::COLLISION_RADIUS
-                    * 0.5
-                    * (my_girth + crate::pixels::girth(&world.pixels, other_offset + oi) * other_scale);
-                if d < reach {
-                    let overlap = reach - d;
-                    let ux = (p[0] - op[0]) / d;
-                    let uy = (p[1] - op[1]) / d;
-                    push[0] += ux * overlap * world.collision_stiffness;
-                    push[1] += uy * overlap * world.collision_stiffness;
-                    // The lighter body yields more, so a small animal is
-                    // shouldered aside by a large one rather than the two
-                    // splitting the correction evenly. Both bodies compute
-                    // their own share independently and the pair separates.
-                    let other_mass = body_size_sum(world, other).max(0.01)
-                        * world.individuals.size_scale[other];
-                    let share = other_mass / (my_mass + other_mass);
-                    separation[0] += ux * overlap * share;
-                    separation[1] += uy * overlap * share;
-                }
-            }
-        }
+    // One query per COMPONENT, at that component's own contact reach, instead
+    // of one query per animal at the world's largest body radius followed by
+    // an all-pairs scan. Same result, a fraction of the work.
+    let my_off = world.individuals.pixel_offset[slot] as usize;
+    for (pi, &p) in ind_pos.iter().enumerate() {
+        let my_girth = crate::pixels::girth(&world.pixels, my_off + pi) * my_scale;
+        let query = crate::COLLISION_RADIUS * 0.5 * (my_girth + max_girth);
+        part_grid.for_each_near(p, query, |other_u, oi_u| {
+            let other = other_u as usize;
+            if other == slot || !world.individuals.alive[other] { return; }
+            let oi = oi_u as usize;
+            // The cached positions and this grid are both built BEFORE the
+            // attachment loop, which bites parts off victims and reallocates
+            // their storage -- so a body's offset and count can both have
+            // moved since. Requiring the cached length to still match the
+            // live part count rejects exactly those bodies; checking only
+            // that the index is inside the cache does not, and reads past the
+            // end of the arena for anything that shrank this tick.
+            let op = match &pos_cache[other] {
+                Some(v) if v.len() == world.individuals.pixel_count[other] as usize => v[oi],
+                _ => return,
+            };
+            let dx = p[0] - op[0];
+            let dy = p[1] - op[1];
+            let d2 = dx * dx + dy * dy;
+            if d2 <= 1e-12 { return; }
+            let other_off = world.individuals.pixel_offset[other] as usize;
+            let other_scale = world.individuals.size_scale[other];
+            let reach = crate::COLLISION_RADIUS
+                * 0.5
+                * (my_girth + crate::pixels::girth(&world.pixels, other_off + oi) * other_scale);
+            if d2 >= reach * reach { return; }
+            let d = d2.sqrt();
+            let overlap = reach - d;
+            let ux = dx / d;
+            let uy = dy / d;
+            push[0] += ux * overlap * world.collision_stiffness;
+            push[1] += uy * overlap * world.collision_stiffness;
+            // The lighter body yields more, so a small animal is shouldered
+            // aside by a large one rather than the two splitting the
+            // correction evenly. Both bodies compute their own share
+            // independently and the pair separates.
+            let other_mass = body_size_sum(world, other).max(0.01) * other_scale;
+            let share = other_mass / (my_mass + other_mass);
+            separation[0] += ux * overlap * share;
+            separation[1] += uy * overlap * share;
+        });
     }
 
     let mut terrain_correction = [0f32; 2];
