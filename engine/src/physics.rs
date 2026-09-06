@@ -636,7 +636,7 @@ fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f
 ///
 /// It costs nothing for the overwhelming majority of the population: a body
 /// needs both a tentacle and a mouth before any of this runs at all.
-fn tentacle_herding(world: &mut World, grid: &SpatialGrid) {
+fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<Vec<[f32; 2]>>]) {
     let slots: Vec<usize> = (0..world.individuals.alive.len())
         .filter(|&s| {
             world.individuals.alive[s]
@@ -650,7 +650,18 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid) {
         let off = world.individuals.pixel_offset[slot] as usize;
         let count = world.individuals.pixel_count[slot] as usize;
         let scale = world.individuals.size_scale[slot];
-        let my_pos = world_positions(world, slot, t);
+        // Same cache reuse as the biting path: recomputing a whole body's
+        // forward kinematics per tick for this is pure waste when it was
+        // already computed this tick, and the length check rejects anything
+        // the attachment loop has since altered.
+        let owned;
+        let my_pos: &[[f32; 2]] = match &pos_cache[slot] {
+            Some(v) if v.len() == count => v,
+            _ => {
+                owned = world_positions(world, slot, t);
+                &owned
+            }
+        };
         if my_pos.len() < count { continue; }
         let mouths: Vec<[f32; 2]> = (0..count)
             .filter(|&k| world.pixels.part_type[off + k] == crate::pixels::PART_MOUTH)
@@ -725,7 +736,12 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid) {
 ///
 /// Returns the local index of the part to bite off, or None if the predator
 /// cannot get a bite this tick.
-fn bite_target(world: &World, attacker: usize, prey: usize) -> Option<u32> {
+fn bite_target(
+    world: &World,
+    attacker: usize,
+    prey: usize,
+    pos_cache: &[Option<Vec<[f32; 2]>>],
+) -> Option<u32> {
     let a_off = world.individuals.pixel_offset[attacker] as usize;
     let a_count = world.individuals.pixel_count[attacker] as usize;
     let p_off = world.individuals.pixel_offset[prey] as usize;
@@ -734,8 +750,33 @@ fn bite_target(world: &World, attacker: usize, prey: usize) -> Option<u32> {
 
     let a_scale = world.individuals.size_scale[attacker];
     let p_scale = world.individuals.size_scale[prey];
-    let a_pos = world_positions(world, attacker, world.sim_time);
-    let p_pos = world_positions(world, prey, world.sim_time);
+    // Reuse this tick's cached forward kinematics rather than recomputing two
+    // whole bodies for every attached pair, every tick. The cache is only
+    // valid for a body that has not been altered since it was built -- this
+    // very loop bites parts off victims -- so the length check is what makes
+    // the reuse safe, and anything that fails it is rebuilt.
+    let cached = |slot: usize| -> Option<&Vec<[f32; 2]>> {
+        match &pos_cache[slot] {
+            Some(v) if v.len() == world.individuals.pixel_count[slot] as usize => Some(v),
+            _ => None,
+        }
+    };
+    let a_owned;
+    let a_pos: &[[f32; 2]] = match cached(attacker) {
+        Some(v) => v,
+        None => {
+            a_owned = world_positions(world, attacker, world.sim_time);
+            &a_owned
+        }
+    };
+    let p_owned;
+    let p_pos: &[[f32; 2]] = match cached(prey) {
+        Some(v) => v,
+        None => {
+            p_owned = world_positions(world, prey, world.sim_time);
+            &p_owned
+        }
+    };
 
     let mut best: Option<(f32, u32)> = None;
     for ak in 0..a_count.min(a_pos.len()) {
@@ -1249,7 +1290,7 @@ pub fn tick(world: &mut World) {
                 .clamp(0.0, crate::CAPTURE_CHEW_CHANCE_MAX);
             if world.rng.random::<f32>() < chew_chance {
                 let target_count = world.individuals.pixel_count[target];
-                if let Some(victim) = bite_target(world, slot, target) {
+                if let Some(victim) = bite_target(world, slot, target, &pos_cache) {
                     let _ = target_count;
                     let (hx, hy) = grid_xy(world, world.individuals.root_pos[target]);
                     let idx = (hx * world.size + hy) as usize;
@@ -1268,7 +1309,7 @@ pub fn tick(world: &mut World) {
     timings.push(("attachment", t0.elapsed().as_secs_f64() * 1000.0));
 
     let t0 = std::time::Instant::now();
-    tentacle_herding(world, &grid);
+    tentacle_herding(world, &grid, &pos_cache);
     timings.push(("herding", t0.elapsed().as_secs_f64() * 1000.0));
 
     let attached_targets: std::collections::HashSet<usize> = alive_slots.iter()
