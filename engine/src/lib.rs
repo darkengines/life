@@ -68,6 +68,11 @@ pub const ANOMALY_BURST_MAX: u32 = 3;
 pub const BASE_METABOLISM: f32 = 0.02;
 pub const PER_PIXEL_METABOLISM: f32 = 0.015;
 pub const EAT_RATE: f32 = 2.0;
+/// How much a single component can strain from the water it occupies each
+/// tick. Feeding is per-component rather than per-animal: a body filtering
+/// water collects across its whole surface, which is what makes being large a
+/// viable way to live on plankton instead of a slow death.
+pub const GRAZE_PER_PART_RATE: f32 = 0.04;
 // Body mass at which grazing yield is already halved. Small bodies live off
 // the food field; large ones have to eat other creatures. This is the single
 // mechanism that turns one undifferentiated crowd into trophic levels.
@@ -584,8 +589,14 @@ pub const SNOW_PLUMES_PER_TICK: u32 = 3;
 /// rate, whereas famine is what makes a reserve worth carrying and a bloom
 /// worth finding. Two periods beating against each other so the rhythm does
 /// not become something a lineage can simply time.
-pub const SNOW_BLOOM_PERIOD_A: f32 = 1900.0;
-pub const SNOW_BLOOM_PERIOD_B: f32 = 730.0;
+// Shortened after measurement. The bloom cycle drives a boom-bust in the
+// population, and a long slow cycle makes that oscillation deep: numbers climb
+// through a bloom and then fall a long way through a long famine, and a world
+// of eighty animals that falls far enough simply ends. Faster, shallower
+// cycles keep the famine real -- it is what makes reserves worth carrying --
+// without letting a single bad trough take the whole population with it.
+pub const SNOW_BLOOM_PERIOD_A: f32 = 850.0;
+pub const SNOW_BLOOM_PERIOD_B: f32 = 310.0;
 /// Below this the water is barren -- a real famine, not a lull.
 pub const SNOW_BLOOM_FLOOR: f32 = 0.34;
 /// Peak plankton input per plume. Calibrated against what the old

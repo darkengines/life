@@ -1808,8 +1808,46 @@ pub fn tick(world: &mut World) {
             let graze_ref =
                 world.graze_mass_ref * (1.0 + crate::FILTER_GRAZE_BONUS * filter_area * speed_frac);
             let graze_efficiency = 1.0 / (1.0 + graze_mass / graze_ref);
-            let eaten = world.fields.food[idx].min(crate::EAT_RATE * 0.1);
-            world.fields.food[idx] -= eaten;
+            // Feeding happens along the WHOLE BODY, not at one point.
+            //
+            // Grazing used to sample a single cell -- the root -- so a
+            // thirty-five part animal spanning twenty cells of water harvested
+            // one of them. That was survivable when food regrew in place
+            // underneath it, and fatal once food became a thin haze drifting
+            // past: the world starved at every plankton level tested,
+            // including the most generous, with starvation holding near half
+            // of all deaths. The supply was never the problem; the intake was.
+            //
+            // An animal filtering water collects across its whole surface, so
+            // reach scales with the body, which is also what makes being large
+            // a viable way to live on plankton rather than a slow death.
+            let mut eaten = 0.0f32;
+            let per_part = crate::GRAZE_PER_PART_RATE * world.individuals.size_scale[slot];
+            let owned_g;
+            let graze_pos: &[[f32; 2]] = match &pos_cache[slot] {
+                Some(v) if v.len() == world.individuals.pixel_count[slot] as usize => v,
+                _ => {
+                    owned_g = world_positions(world, slot, world.sim_time);
+                    &owned_g
+                }
+            };
+            let mut cells: Vec<usize> = graze_pos
+                .iter()
+                .map(|p| {
+                    let (gx, gy) = grid_xy(world, *p);
+                    (gx * world.size + gy) as usize
+                })
+                .collect();
+            // A body doubled back on itself would otherwise harvest the same
+            // water twice over.
+            cells.sort_unstable();
+            cells.dedup();
+            for c in cells {
+                let take = world.fields.food[c].min(per_part);
+                if take <= 0.0 { continue; }
+                world.fields.food[c] -= take;
+                eaten += take;
+            }
             world.individuals.energy[slot] +=
                 eaten * 5.0 * graze_efficiency * digestion_multiplier(world, slot);
             world.individuals.ticks_since_fed[slot] += 1;
