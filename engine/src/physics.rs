@@ -1036,7 +1036,8 @@ pub fn tick(world: &mut World) {
         // reproductions collapsed onto one row (observed reaching 28), which
         // is not a per-step reward at all and wrecked the training targets.
         world.individuals.pending_reward[slot] = 0.0;
-        let (d, thrust, contact, _, _, torque) = &pre[i];
+        let (d, thrust, contact, _, crowding, torque) = &pre[i];
+        let crowding = *crowding;
         let torque = *torque;
         // Negative frequency-dependent selection (Red Queen / rare-type
         // advantage): a specialist pathogen tracks whichever host is
@@ -1288,6 +1289,40 @@ pub fn tick(world: &mut World) {
                 // would quietly stop mattering.
                 + crate::DISEASE_RESISTANCE_METABOLIC_COST * world.individuals.disease_resistance[slot];
             world.individuals.energy[slot] -= metabolism * world.metabolism_multiplier;
+
+            // Crowding costs. Bodies were piling on top of one another with no
+            // penalty at all, so a creature could sit in a heap, breed, and do
+            // nothing else -- which is most of what the world had become.
+            // Competition for space is a real and continuous cost in nature:
+            // packed animals interfere with each other's feeding, are stressed
+            // by proximity, and pay for it. Charged above a threshold so an
+            // ordinary family group is free and only genuine crush is
+            // punished, and scaled by body size because a large animal needs
+            // proportionally more room.
+            let crowd_excess = (crowding - crate::CROWDING_TOLERANCE).max(0.0);
+            if crowd_excess > 0.0 {
+                let mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
+                world.individuals.energy[slot] -= crate::CROWDING_ENERGY_COST
+                    * crowd_excess
+                    * (1.0 + mass * crate::CROWDING_SIZE_FACTOR);
+            }
+
+            // Contested ground. Sitting inside someone else's scent marks is
+            // expensive: it is the cost of trespassing on a defended range,
+            // and it is what gives territorial marking a consequence rather
+            // than leaving it a decorative field. A creature near its OWN home
+            // pays nothing, so holding a range is worth something.
+            let local_marks = crate::fields::Fields::sample(
+                &world.fields.territory, world.size, world.individuals.root_pos[slot]);
+            if local_marks > crate::TRESPASS_MARK_THRESHOLD {
+                let home = world.individuals.home_pos[slot];
+                let pos = world.individuals.root_pos[slot];
+                let from_home = ((home[0] - pos[0]).powi(2) + (home[1] - pos[1]).powi(2)).sqrt();
+                if from_home > crate::BREEDING_SPACE_RADIUS {
+                    world.individuals.energy[slot] -=
+                        crate::TRESPASS_ENERGY_COST * (local_marks - crate::TRESPASS_MARK_THRESHOLD);
+                }
+            }
 
             // Janzen-Connell in one line: damage scales with how densely
             // this individual's OWN KIND is packed around it (not generic

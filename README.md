@@ -466,6 +466,36 @@ Everything the owner has asked for, objected to, or proposed, recorded verbatim 
 substance so none of it is lost. Status: **[x]** done · **[~]** partly done · **[ ]** open ·
 **[?]** open question.
 
+### The collapse: why complexity appears and then disappears
+
+The single most important finding about this world, and one that invalidated a
+lot of earlier reporting. Measured at **6000 ticks** the population looks
+healthy: mean 8-12 parts, bodies up to 29, organs at 27-39% of all tissue,
+only a few percent unbranched. Measured at **18000-19400 ticks** it is a
+different world: **mean 3.5-4.3 parts, 78% of creatures four parts or fewer,
+37-53% pure unbranched chains, and organs at 25% -- exactly the rate at which
+random differentiation produces them, i.e. selection is not favouring them at
+all.**
+
+Complexity emerges and then collapses. Every measurement taken at 6000 ticks
+was measuring the emergence and missing the collapse.
+
+The cause is economic. With food regrowing fast enough that a grazed patch
+never empties, and a crowded world, a three-part worm that breeds constantly
+out-competes anything that invests in a body. And being large was
+mathematically unviable: a 20-part predator burns 41 energy per 100 ticks in
+upkeep while engulfing a 3-part prey paid 3.1 -- it needed a kill every eight
+ticks merely to break even.
+
+Compounding it, six separate size-and-complexity penalties had been added
+individually, each defensible alone, without ever checking their combined
+effect: per-part reproduction cost, gestation scaling with size, breeding-space
+scaling with size, grazing efficiency falling with mass, per-organ metabolic
+surcharges, and pathogen pressure. Together they make minimalism optimal.
+
+**Lesson for future work here: measure at 18000+ ticks, not 6000, and check
+what a stack of individually-sensible costs does in combination.**
+
 ### The central complaint
 
 > *"creatures are still very basic and fail to develop complex structure and behavior, it is

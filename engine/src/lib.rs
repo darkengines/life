@@ -374,6 +374,19 @@ pub const HOME_RANGE_NORM: f32 = 50.0;
 // rather than an instant death sentence. Resistance divides the damage
 // (1/(1+r)) instead of subtracting it, so it always helps but never grants
 // full immunity no matter how high it evolves.
+// Competition for space. Bodies stacked on each other with no penalty, so a
+// creature could sit in a heap and breed without ever needing to do anything
+// well. Charged only above a tolerance, so an ordinary family group is free
+// and only a genuine crush costs; scaled by body size, because a large animal
+// needs proportionally more room than a small one.
+pub const CROWDING_TOLERANCE: f32 = 3.0;
+pub const CROWDING_ENERGY_COST: f32 = 0.012;
+pub const CROWDING_SIZE_FACTOR: f32 = 0.02;
+// Trespassing on ground someone else has marked. This is what turns territory
+// marking from a decorative field into a defended range worth holding.
+pub const TRESPASS_MARK_THRESHOLD: f32 = 0.30;
+pub const TRESPASS_ENERGY_COST: f32 = 0.05;
+
 pub const CONSPECIFIC_KERNEL_EXPONENT: i32 = 4;
 pub const CONSPECIFIC_DENSITY_NORM: f32 = 4.0;
 // Response curve, calibrated against a measured distribution rather than
