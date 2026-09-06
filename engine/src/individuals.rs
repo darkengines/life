@@ -42,8 +42,18 @@ pub const LATENT_DIM: usize = 12;
 // and the brain could only STEER -- it could not accelerate toward prey,
 // sprint away from a predator, or stop to conserve energy. That is almost
 // certainly why fleeing never evolved at all: there was no way to flee.
-pub const ACT_DIM: usize = 8 + MEM_DIM;
+pub const ACT_DIM: usize = 9 + MEM_DIM;
 pub const SWIM_EFFORT_IDX: usize = 7;
+/// Asymmetry the brain imposes on its own bending wave. This is how a real
+/// swimmer turns: it curves its body, the curved body pushes water
+/// asymmetrically, and the resulting TORQUE rotates it. Heading used to be a
+/// variable the brain simply assigned, with the body rotated to match, so
+/// orientation was imposed rather than earned and had no physical
+/// relationship to how the body was actually moving. Measured consequence:
+/// the angle between where a creature pointed and where it actually went
+/// averaged ~91 degrees, i.e. steering did not control movement at all --
+/// which caps how much any brain can ever matter.
+pub const TURN_BIAS_IDX: usize = 8;
 pub const FIGHT_URGE_IDX: usize = 3;
 
 pub struct Individuals {
@@ -99,6 +109,23 @@ pub struct Individuals {
     // amplitude in the forward-kinematics pass, so it feeds straight through
     // to thrust. State, not genome.
     pub swim_gain: Vec<f32>,
+    /// Constant curvature currently held in the body, set by the brain.
+    pub turn_curvature: Vec<f32>,
+    /// Rotation rate, integrated from fluid torque -- NOT assigned. A body
+    /// keeps spinning until the water stops it.
+    pub angular_velocity: Vec<f32>,
+    /// Angle, in the body's own frame, from the root toward the body's centre
+    /// of mass -- its anterior/posterior axis.
+    ///
+    /// Without this, `heading` merely ROTATED the body: a creature whose parts
+    /// happened to grow off to one side moved sideways relative to the
+    /// direction it was nominally facing, and the offset differed per
+    /// individual according to the shape it happened to grow. Pooled over a
+    /// population that is exactly a uniform random offset, which is why the
+    /// angle between heading and actual movement measured ~79 degrees and
+    /// stayed flat no matter how fast a creature was going. Subtracting this
+    /// makes `heading` mean what it claims: the direction the body points.
+    pub axis_offset: Vec<f32>,
     // Cached count of each body-part kind (see pixels.rs). Derived data, not
     // genome: recomputed only when a body actually changes (birth, growth, a
     // part bitten off), so the per-tick effect lookups stay O(1) instead of
@@ -189,6 +216,9 @@ impl Individuals {
             home_pos: Vec::with_capacity(cap),
             disease_resistance: Vec::with_capacity(cap),
             swim_gain: Vec::with_capacity(cap),
+            turn_curvature: Vec::with_capacity(cap),
+            angular_velocity: Vec::with_capacity(cap),
+            axis_offset: Vec::with_capacity(cap),
             part_counts: Vec::with_capacity(cap),
             pending_reward: Vec::with_capacity(cap),
             memory_transmission_rate: Vec::with_capacity(cap),
@@ -244,6 +274,9 @@ impl Individuals {
             self.home_pos.push([0.0, 0.0]);
             self.disease_resistance.push(0.0);
             self.swim_gain.push(1.0);
+            self.turn_curvature.push(0.0);
+            self.angular_velocity.push(0.0);
+            self.axis_offset.push(0.0);
             self.part_counts.push([0; crate::pixels::PART_KIND_COUNT as usize]);
             self.pending_reward.push(0.0);
             self.memory_transmission_rate.push(0.0);
@@ -468,6 +501,35 @@ pub fn distill_policy(
     }
 }
 
+/// Recomputes the body's anterior axis from its REST pose: the direction from
+/// the root to the centroid of all its parts. Must be recomputed whenever the
+/// body plan changes, since growing a limb to one side moves the centre of
+/// mass and therefore what "forwards" means for this animal.
+pub fn recompute_axis_offset(individuals: &mut Individuals, pixels: &PixelArena, slot: usize) {
+    let offset = individuals.pixel_offset[slot];
+    let count = individuals.pixel_count[slot];
+    if count < 2 {
+        individuals.axis_offset[slot] = 0.0;
+        return;
+    }
+    let grid = rest_grid_positions(pixels, offset, count);
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    for &(gx, gy) in grid.iter() {
+        cx += gx as f32;
+        cy += gy as f32;
+    }
+    cx /= count as f32;
+    cy /= count as f32;
+    // grid[0] is the root by construction.
+    let (rx, ry) = (grid[0].0 as f32, grid[0].1 as f32);
+    let (dx, dy) = (cx - rx, cy - ry);
+    individuals.axis_offset[slot] = if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
+        0.0
+    } else {
+        dy.atan2(dx)
+    };
+}
+
 pub fn recompute_part_counts(individuals: &mut Individuals, pixels: &PixelArena, slot: usize) {
     let offset = individuals.pixel_offset[slot] as usize;
     let count = individuals.pixel_count[slot] as usize;
@@ -619,6 +681,7 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
     individuals.pixel_offset[slot] = new_offset;
     individuals.pixel_count[slot] = count + added;
     recompute_part_counts(individuals, pixels, slot);
+    recompute_axis_offset(individuals, pixels, slot);
     true
 }
 
@@ -687,6 +750,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     pixels.part_type[offset as usize] = crate::pixels::PART_BODY;
     pixels.symmetric[offset as usize] = rng.random::<f32>() < crate::SYMMETRY_FOUNDER_CHANCE;
     recompute_part_counts(individuals, pixels, slot);
+    recompute_axis_offset(individuals, pixels, slot);
     individuals.randomize_brain(slot, rng);
     individuals.id_to_slot.insert(individuals.id[slot], slot);
     slot
@@ -775,6 +839,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
     individuals.inherit_brain(parent, child, wt_rate, rng);
 
     recompute_part_counts(individuals, pixels, child);
+    recompute_axis_offset(individuals, pixels, child);
     grow_one_pixel(individuals, pixels, rng, child); // one body-plan variation at birth, matches Python
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to

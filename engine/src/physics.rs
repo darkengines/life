@@ -40,7 +40,13 @@ pub fn world_positions(world: &World, slot: usize, t: f32) -> Vec<[f32; 2]> {
 pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) -> Vec<[f32; 2]> {
     let offset = world.individuals.pixel_offset[slot] as usize;
     let count = world.individuals.pixel_count[slot] as usize;
-    let heading = world.individuals.heading[slot];
+    // Subtracting the body's own axis makes `heading` the direction the animal
+    // actually points, rather than an arbitrary rotation of whatever shape it
+    // happened to grow into. Without it a creature whose parts grew off to one
+    // side moved sideways relative to where it was nominally facing, by a
+    // different offset per individual -- which pools to look like pure noise,
+    // and is why heading-vs-movement measured ~79 degrees at every speed.
+    let heading = world.individuals.heading[slot] - world.individuals.axis_offset[slot];
     // Undulation amplitude is the evolved body rhythm scaled by how hard the
     // brain has decided to swim right now -- genetics sets the stroke, the
     // mind sets the effort.
@@ -61,7 +67,12 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
     let mut positions = vec![[0f32; 2]; count];
     for k in 0..count {
         let flex = world.pixels.flex[offset + k];
-        let raw_wave = flex * amp * (std::f32::consts::TAU * freq * t + phase + (k as f32) * 0.7).sin();
+        // Undulation plus the constant curvature the brain is holding. A
+        // curved body pushes water to one side, which is what produces the
+        // torque that turns it -- the animal steers by SHAPING ITSELF, not by
+        // having its orientation overwritten.
+        let raw_wave = flex * amp * (std::f32::consts::TAU * freq * t + phase + (k as f32) * 0.7).sin()
+            + world.individuals.turn_curvature[slot] * flex;
         // Joint angle limits: a real hinge constraint on how far THIS
         // joint's animated bend can deviate from its rest pose, heritable
         // per part (pixels.rs's min_angle/max_angle). Previously every
@@ -93,6 +104,42 @@ pub fn pixel_velocities(world: &World, slot: usize, t: f32, eps: f32) -> Vec<[f3
     let plus = world_positions(world, slot, t + eps);
     let minus = world_positions(world, slot, t - eps);
     plus.iter().zip(minus.iter()).map(|(p, m)| [(p[0] - m[0]) / (2.0 * eps), (p[1] - m[1]) / (2.0 * eps)]).collect()
+}
+
+/// Net fluid force AND the torque it exerts about the body's root.
+///
+/// Torque is what turns the animal. Returning only the force meant rotation
+/// had to come from somewhere else -- and it came from the brain assigning a
+/// heading directly, which is why pointing and moving were unrelated.
+pub fn fluid_thrust_torque(world: &World, slot: usize, pos: &[[f32; 2]], vel: &[[f32; 2]]) -> ([f32; 2], f32) {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let count = pos.len();
+    let mut force = [0f32; 2];
+    let mut torque = 0f32;
+    let root = if count > 0 { pos[0] } else { [0.0, 0.0] };
+    for k in 1..count {
+        let parent = world.pixels.parent_idx[offset + k];
+        if parent < 0 { continue; }
+        let p = parent as usize;
+        let sx = pos[k][0] - pos[p][0];
+        let sy = pos[k][1] - pos[p][1];
+        let seg_len = (sx * sx + sy * sy).sqrt();
+        if seg_len < 1e-8 { continue; }
+        let (tx, ty) = (sx / seg_len, sy / seg_len);
+        let (vx, vy) = (vel[k][0], vel[k][1]);
+        let v_par = vx * tx + vy * ty;
+        let (vparx, vpary) = (v_par * tx, v_par * ty);
+        let (vperpx, vperpy) = (vx - vparx, vy - vpary);
+        let fx = -(crate::DRAG_PARALLEL * vparx + crate::DRAG_PERPENDICULAR * vperpx) * seg_len;
+        let fy = -(crate::DRAG_PARALLEL * vpary + crate::DRAG_PERPENDICULAR * vperpy) * seg_len;
+        force[0] += fx;
+        force[1] += fy;
+        // r x F, about the root, for the 2D scalar torque.
+        let rx = pos[k][0] - root[0];
+        let ry = pos[k][1] - root[1];
+        torque += rx * fy - ry * fx;
+    }
+    (force, torque)
 }
 
 pub fn fluid_thrust_force(world: &World, slot: usize, pos: &[[f32; 2]], vel: &[[f32; 2]]) -> [f32; 2] {
@@ -838,7 +885,7 @@ pub fn tick(world: &mut World) {
     // death) has real cross-individual mutation and stays sequential --
     // that's the actual reason this couldn't just be one big par_iter.
     let t0 = std::time::Instant::now();
-    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32)> = deciding
+    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32)> = deciding
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
@@ -849,7 +896,7 @@ pub fn tick(world: &mut World) {
             } else {
                 (world_positions(world, slot, world.sim_time), pixel_velocities(world, slot, world.sim_time, 0.02))
             };
-            let thrust = fluid_thrust_force(world, slot, &ind_pos, &ind_vel);
+            let (thrust, torque) = fluid_thrust_torque(world, slot, &ind_pos, &ind_vel);
             let contact = contact_force(world, slot, &ind_pos, &grid, &pos_cache);
             // Deterministic sampling (no RNG call here -- this closure runs
             // in parallel and must stay a pure function of tick-start
@@ -877,7 +924,7 @@ pub fn tick(world: &mut World) {
             };
             // Raw density carried through rather than re-scanning
             // neighbors in the sequential phase where the drain is applied.
-            (d, thrust, contact, sample, conspecific_density)
+            (d, thrust, contact, sample, conspecific_density, torque)
         })
         .collect();
     timings.push(("decide_parallel", t0.elapsed().as_secs_f64() * 1000.0));
@@ -901,7 +948,8 @@ pub fn tick(world: &mut World) {
         // reproductions collapsed onto one row (observed reaching 28), which
         // is not a per-step reward at all and wrecked the training targets.
         world.individuals.pending_reward[slot] = 0.0;
-        let (d, thrust, contact, _, _) = &pre[i];
+        let (d, thrust, contact, _, _, torque) = &pre[i];
+        let torque = *torque;
         // Negative frequency-dependent selection (Red Queen / rare-type
         // advantage): a specialist pathogen tracks whichever host is
         // ABUNDANT, so the commonest lineage pays the highest price and
@@ -931,12 +979,25 @@ pub fn tick(world: &mut World) {
         }
 
         if !is_captured {
-            if move_x.abs() + move_y.abs() > 0.05 {
-                let desired = move_y.atan2(move_x);
-                let mut diff = (desired - world.individuals.heading[slot] + std::f32::consts::PI) % std::f32::consts::TAU - std::f32::consts::PI;
-                diff = diff.clamp(-crate::TURN_RATE, crate::TURN_RATE);
-                world.individuals.heading[slot] += diff;
-            }
+            // Steering is now something the body DOES, not something the
+            // brain declares. The brain holds a curvature; the curved body
+            // pushes water asymmetrically; the resulting torque rotates it,
+            // damped by the water. A creature therefore has to learn to use
+            // its own shape to go where it wants -- which is the whole point,
+            // and is why the previous arrangement (assign a heading, rotate
+            // the body to match) left pointing and moving unrelated.
+            world.individuals.turn_curvature[slot] =
+                d[crate::individuals::TURN_BIAS_IDX] * crate::TURN_CURVATURE_SCALE;
+
+            let inertia = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0)
+                * crate::ROTATIONAL_INERTIA;
+            let ang_acc = torque / inertia
+                - crate::ANGULAR_DAMPING * world.individuals.angular_velocity[slot];
+            world.individuals.angular_velocity[slot] =
+                (world.individuals.angular_velocity[slot] + ang_acc * world.dt)
+                    .clamp(-crate::MAX_ANGULAR_SPEED, crate::MAX_ANGULAR_SPEED);
+            world.individuals.heading[slot] +=
+                world.individuals.angular_velocity[slot] * world.dt;
 
             let mass = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0);
 
@@ -961,7 +1022,8 @@ pub fn tick(world: &mut World) {
 
             // Flippers convert the same swimming effort into more thrust.
             let fin = thrust_multiplier(world, slot);
-            let noise = [normal(&mut world.rng, 0.0, crate::THERMAL_NOISE), normal(&mut world.rng, 0.0, crate::THERMAL_NOISE)];
+            let tn = world.thermal_noise;
+            let noise = [normal(&mut world.rng, 0.0, tn), normal(&mut world.rng, 0.0, tn)];
             let gravity_force = [0.0, -crate::GRAVITY * mass];
             let vel = world.individuals.velocity[slot];
             let accel = [

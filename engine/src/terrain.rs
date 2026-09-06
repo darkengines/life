@@ -34,6 +34,9 @@ const N_CREVICE_POCKETS: u32 = 70;
 // Corridor half-width. Small bodies fit; large ones cannot manoeuvre.
 const TUNNEL_RADIUS: i32 = 2;
 const CREVICE_MOUTH_RADIUS: i32 = 1;
+// How far up the water column reef structure can reach, as a fraction of
+// world height. Everything rock-like lives inside this band above the floor.
+const REEF_MAX_RISE: f32 = 0.30;
 
 pub struct Terrain {
     pub size: u32,
@@ -53,14 +56,20 @@ impl Terrain {
                 kind[(x * size + y) as usize] = TerrainKind::Sand;
             }
         }
+        // Rock belongs to the seafloor. Scattering clusters up through the
+        // water column left boulders hanging in mid-water with nothing holding
+        // them up, which reads as broken rather than as an environment. Real
+        // reef and rock formations sit ON the bottom and rise from it, so
+        // cluster centres are drawn near the floor and fall off sharply with
+        // height -- the occasional tall outcrop still reaches up, but nothing
+        // floats free.
         for _ in 0..N_ROCK_CLUSTERS {
             let cx = rng.random_range(0.0..size as f32);
-            let on_floor = rng.random::<f32>() < 0.5;
-            let cy = if on_floor {
-                rng.random_range(0.0..(floor_height as f32 * 1.3).max(1.0))
-            } else {
-                rng.random_range(floor_height as f32..(size as f32 * 0.7).max(floor_height as f32 + 1.0))
-            };
+            // Squaring a 0..1 draw biases strongly toward the floor while
+            // still allowing the occasional tall formation.
+            let h = rng.random::<f32>();
+            let rise = h * h * size as f32 * REEF_MAX_RISE;
+            let cy = floor_height as f32 + rise;
             let radius = rng.random_range(size as f32 * 0.02..size as f32 * 0.065);
             let r2 = radius * radius;
             for x in 0..size {
@@ -127,9 +136,13 @@ impl Terrain {
         // Free-standing crevices: a small rock ring with a hollow middle and
         // a narrow mouth. These sit out in open water and on the floor, so
         // refuge isn't confined to the big reef masses.
+        // Crevices belong in the rock, not floating in open water. Placed
+        // within the reef band just above the floor, so they read as pockets
+        // eroded into the bottom structure.
         for _ in 0..N_CREVICE_POCKETS {
             let cx = rng.random_range(2..size as i32 - 2);
-            let cy = rng.random_range(2..size as i32 - 2);
+            let band = ((size as f32 * REEF_MAX_RISE) as i32).max(6);
+            let cy = (floor_height as i32 + rng.random_range(0..band)).min(size as i32 - 3);
             let outer = rng.random_range(5..9);
             for dx in -outer..=outer {
                 for dy in -outer..=outer {

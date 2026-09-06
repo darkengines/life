@@ -21,6 +21,7 @@ below are described as "made possible" rather than "implemented".
 6. [Performance](#6-performance)
 7. [Findings, including negative ones](#7-findings-including-negative-ones)
 8. [Roadmap / wishlist](#8-roadmap--wishlist)
+8A. [Requirements, concerns and ideas from the project owner](#8a-requirements-concerns-and-ideas-from-the-project-owner)
 9. [Development notes](#9-development-notes)
 10. [Bibliography](#10-bibliography)
 
@@ -450,6 +451,120 @@ ecology).
   regressions have twice appeared silently as a side effect of unrelated changes.
 
 ---
+
+
+## 8A. Requirements, concerns and ideas from the project owner
+
+Everything the owner has asked for, objected to, or proposed, recorded verbatim in
+substance so none of it is lost. Status: **[x]** done · **[~]** partly done · **[ ]** open ·
+**[?]** open question.
+
+### The central complaint
+
+> *"creatures are still very basic and fail to develop complex structure and behavior, it is
+> boring"* · *"natural selection pressure is not high enough, at the end the whole world is
+> filled with stacked individuals with no survivability pressure, infinite food, no predation,
+> no big predator or whale eating all small organisms"*
+
+This turned out to be correct on every count, and measurement backed each part of it: food was
+effectively infinite (mean energy ~96 against a reproduction threshold near 20), bodies were
+being actively selected *down* in complexity, half the world was frozen in capture deadlock, and
+brains performed no better than random ones.
+
+### Population, pressure and life history
+
+- **[x] Reproduction must not explode.** Cost was a flat fee regardless of offspring size, so
+  biomass was conjured from nothing. Now priced per part.
+- **[x] Space is a requirement for reproducing.** A crowded patch produces no offspring.
+- **[x] Reward on the reproduction act, but it needs space and safety.** Blood in the water
+  blocks breeding; reproduction credits a reward into the experience log.
+- **[x] Larger bodies should have longer gestation.** Gestation scales with offspring size.
+- **[~] Larger bodies must eat more.** Metabolism scales with parts and organ types; grazing
+  yield now falls with mass so large animals must hunt. Whether the scaling is *steep* enough
+  is unverified.
+- **[x] Big creatures should eat many small ones in one sweep.** A sweep budget scaling with
+  body mass, plus gape-limited engulfing that swallows small prey whole.
+- **[x] Other individuals are food for emergent predators.** 92% of deaths are now predation.
+- **[ ] Life should become rarer.** Population self-limits (~600–1400 rather than a 6000 cap)
+  but the owner wants fewer, larger animals still.
+- **[ ] Creatures should not stack on each other.** Contact now scales with real part size, but
+  crowding at high density is not solved.
+- **[?] Are reproductive anomalies (mutations) well diversified?** Raised by the owner and **not
+  yet investigated** — the mutation model may be too narrow to generate real morphological
+  variety.
+
+### Bodies and structure
+
+- **[x] More basic components.** Seven part types: body, eye, mouth, gut, tentacle, armor, flipper.
+- **[x] Bilateral symmetry as a property of a node.** Growing a component on a symmetric node
+  emits a mirrored twin at the reflected angle, with mirrored hinge limits.
+- **[x] Bounding boxes should apply to all components.** Terrain collision uses each part's own
+  radius rather than treating parts as dimensionless points.
+- **[ ] Creatures are essentially worms or very basic structures.** Topologically they are *not*
+  worms (78% branch, ~1.2 branch points per body), but growth still weights "extend an existing
+  tip in the same direction" at **8x** everything else, which biases hard toward elongation. That
+  weight is a prime suspect and is **not yet changed**.
+- **[ ] Emergent organs that compose into higher-order structures.** Division of labour exists;
+  anatomy with real topology does not.
+
+### Motion physics
+
+- **[x] Motion should be a consequence of component movement, not the reverse — the creature must
+  learn to use its own body.** This was the deepest architectural correction of the session.
+  Heading used to be a variable the brain simply *assigned*, with the body rotated to match.
+  Now the brain holds a body curvature, the curved body pushes water asymmetrically, and the
+  resulting **torque** rotates it. Rotation is integrated from fluid forces, never assigned.
+- **[x] Bodies need a real anterior axis.** `heading` merely rotated whatever shape a creature
+  grew into, so the offset between "pointing" and "moving" differed per individual and pooled to
+  look like noise. Each body now has an axis from root to centre of mass.
+- **[~] "They swim with the tail frontward."** The measured reality was worse than tail-first: the
+  angle between heading and actual movement averaged ~91°, i.e. **statistically random**.
+  Torque-driven turning plus the anterior axis improved the fastest swimmers to ~58°, but with
+  thermal noise removed entirely alignment still sits near 81°. **Propulsion is still not
+  reliably axis-locked — this is unresolved and is the most important open physics problem.**
+- **[ ] Animals should swim using fins — lateral and rear propulsion.** Flippers exist as an
+  organ that multiplies thrust, but propulsion is still whole-body undulation; fins do not
+  generate directional thrust from their own motion.
+
+### Environment
+
+- **[x] Rocks should be in patches near the ground, not floating everywhere.** Rock formations are
+  now anchored to the seafloor and rise from it within a reef band.
+- **[x] Caves are welcome.** Cave networks are carved through the rock by drifting random walks,
+  plus eroded crevice pockets.
+- **[x] Collision with rock is not working.** Three separate leaks, now fixed; embedded parts fell
+  from 7.8–11.6% to 0.24–1.11%.
+- **[x] Small creatures should survive in caves and quiet places big ones cannot reach.** Verified:
+  small bodies occupy positions with ~80% more surrounding rock than large ones, purely from
+  geometry.
+- **[ ] More dynamism and diversity in the world and its components.** Day/night, weather and the
+  reef exist; the world is still largely static over time.
+
+### Intelligence
+
+- **[x] Improve intelligence with a common brain part trained on the RTX 6000, bigger networks,
+  trained asynchronously from experience replay, so the simulation keeps running at full speed.**
+  Built and closed end to end.
+- **[x] The brain should be composable; a new sensory component means a new input.** Vision is
+  organ-gated — no eye, no visual input.
+- **[x] A shared latent space of the surroundings, composed from sensors; the encoder may be
+  shared, but each decision is per individual.** Exactly the implemented architecture.
+- **[x] The neural computation is heavy and must be asynchronous.** Training runs in its own
+  process; the simulation never waits.
+- **[~] "Intelligence sucks."** Correct when raised, and only partly addressed. Measured: evolved
+  brains were no better than random. After the shared encoder and inherited instinct,
+  prey-pursuit is meaningfully better (positive in 4/4 seeds), but fleeing and mate-approach
+  still show **no learning at all**, and the effect sizes are small.
+- **[ ] Bigger networks.** Still a 12-unit hidden layer.
+- **[?] Do creatures genuinely learn to swim?** Not demonstrated. See the motion physics section:
+  until propulsion is reliably axis-locked, "learning to swim" cannot be claimed.
+
+### Standing instructions
+
+- Keep iterating autonomously; do not stop.
+- Periodically research real biology and ecology, and mine the bibliography for mechanisms.
+- Watch performance continuously, and keep the world legible rather than an unreadable mess.
+- Verify with measurement before claiming anything works.
 
 ## 9. Development notes
 

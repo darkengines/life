@@ -517,6 +517,12 @@ pub const POLICY_DISTILL_RATE: f32 = 0.25;
 // worth it when something is actually at stake.
 pub const SWIM_GAIN_MIN: f32 = 0.15;
 pub const SWIM_GAIN_MAX: f32 = 1.9;
+// Turning as physics rather than assignment. The brain holds a body
+// curvature; fluid torque on that curved body rotates it, damped by water.
+pub const TURN_CURVATURE_SCALE: f32 = 0.9;
+pub const ROTATIONAL_INERTIA: f32 = 2.5;
+pub const ANGULAR_DAMPING: f32 = 2.0;
+pub const MAX_ANGULAR_SPEED: f32 = 2.5;
 
 pub const WEATHER_TRIGGER_CHANCE: f64 = 0.0006;
 
@@ -618,6 +624,9 @@ pub struct World {
     /// Runtime-overridable GRAZE_MASS_REF, so the trophic threshold can be
     /// swept against fixed seeds instead of guessed at.
     pub graze_mass_ref: f32,
+    /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
+    /// against fixed seeds rather than guessed at.
+    pub thermal_noise: f32,
 
     // The world's shared perception encoder (see individuals::encode). One
     // matrix for every creature alive, initialised randomly. A random
@@ -688,6 +697,7 @@ impl World {
             pathogen_damage_rate: PATHOGEN_DAMAGE_RATE,
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
             graze_mass_ref: GRAZE_MASS_REF,
+            thermal_noise: THERMAL_NOISE,
             shared_enc_w,
             shared_enc_b,
             shared_policy: None,
@@ -1144,6 +1154,11 @@ impl World {
         d.set_item("latent_dim", individuals::LATENT_DIM).unwrap();
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
+    }
+
+    /// Test-only: overrides the thermal noise floor.
+    fn debug_set_thermal_noise(&mut self, v: f32) {
+        self.thermal_noise = v;
     }
 
     /// Test-only: overrides the mass at which grazing yield halves.
