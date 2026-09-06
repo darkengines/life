@@ -1079,7 +1079,11 @@ function render() {
   if (showCorpses) {
     for (const c of (d.corpses || [])) {
       const [cr, cg, cb] = c.color;
-      const fade = Math.max(0.15, Math.min(0.55, c.energy / 15));
+      // Fade on what FRACTION is left, not on absolute energy: a whale fall
+      // carries thousands of units, so an absolute scale pinned it at full
+      // opacity for its entire life and it read as never being eaten.
+      const left = c.energy_frac !== undefined ? c.energy_frac : Math.min(1, c.energy / 15);
+      const fade = Math.max(0.12, Math.min(0.6, 0.15 + left * 0.5));
       for (const [px, py] of c.positions) {
         const sx = px * cell, sy = canvas.height - py * cell;
         ctx.fillStyle = `rgba(${cr * 0.5 | 0},${cg * 0.5 | 0},${cb * 0.5 | 0},${fade.toFixed(2)})`;

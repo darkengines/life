@@ -68,11 +68,21 @@ pub const ANOMALY_BURST_MAX: u32 = 3;
 pub const BASE_METABOLISM: f32 = 0.02;
 pub const PER_PIXEL_METABOLISM: f32 = 0.015;
 pub const EAT_RATE: f32 = 2.0;
-/// How much a single component can strain from the water it occupies each
-/// tick. Feeding is per-component rather than per-animal: a body filtering
-/// water collects across its whole surface, which is what makes being large a
-/// viable way to live on plankton instead of a slow death.
-pub const GRAZE_PER_PART_RATE: f32 = 0.04;
+/// What a unit of EXPOSED body surface, and a unit of dedicated feeding
+/// apparatus, can strain from the water each tick. Surface rather than mass,
+/// because that is how filtration actually scales; organs rather than flank,
+/// because that is where real animals do their feeding.
+pub const GRAZE_SURFACE_RATE: f32 = 0.055;
+pub const GRAZE_ORGAN_RATE: f32 = 0.16;
+/// Energy per unit of plankton swallowed. Thin gruel, deliberately: this is
+/// the "less caloric" half of dilute food, and it is what forces an animal to
+/// move a lot of water rather than take a few rich mouthfuls.
+pub const PLANKTON_CALORIES: f32 = 1.5;
+/// How long a newly-changed body plan is shielded from full selection while
+/// its inherited controller readapts. See Individuals::innovation_protect.
+pub const INNOVATION_PROTECT_TICKS: u32 = 260;
+/// How much of the usual pressure a protected animal feels.
+pub const INNOVATION_PROTECT_METABOLISM: f32 = 0.55;
 // Body mass at which grazing yield is already halved. Small bodies live off
 // the food field; large ones have to eat other creatures. This is the single
 // mechanism that turns one undifferentiated crowd into trophic levels.
@@ -137,8 +147,13 @@ pub const GROWTH_STRAIGHT_TIP_WEIGHT: f32 = 2.0;
 // Bilateral symmetry (see pixels.rs). Present in a minority of founders and
 // able to flip either way when a part grows, so paired body plans are
 // something evolution finds and can also lose, not a property of the world.
-pub const SYMMETRY_FOUNDER_CHANCE: f32 = 0.35;
-pub const SYMMETRY_FLIP_CHANCE: f32 = 0.06; // odds a node's symmetry trait flips when inherited
+pub const SYMMETRY_FOUNDER_CHANCE: f32 = 0.55;
+// Lowered: at 6% a bilateral body plan was being un-made almost as fast as it
+// was made, so symmetry never became a stable feature of a lineage. Real body
+// plans are conserved over enormous spans -- bilateral symmetry is older than
+// most of the animal kingdom -- and that conservation is what lets structure
+// accumulate on top of them instead of being re-invented every generation.
+pub const SYMMETRY_FLIP_CHANCE: f32 = 0.015;
 /// How much a symmetric node prefers to grow laterally, where a mirrored twin
 /// is actually possible, over extending along the body axis where it is not.
 pub const SYMMETRY_LATERAL_WEIGHT: f32 = 1.0;
@@ -344,7 +359,12 @@ pub const FOOD_SMELL_RANGE: i32 = 18;
 // the exchange boundary is a perimeter and the bulk is an area, so the
 // surface law gives an exponent near 0.5; 1.0 would be cost strictly
 // proportional to area, which measurement shows collapses worlds outright.
-pub const METABOLIC_EXPONENT: f32 = 0.6;
+// Back to the Kleiber value now that intake no longer scales linearly with
+// mass. What matters is the ORDERING: real intake goes as roughly W^0.66-0.70
+// and real metabolism as W^0.75, so upkeep outruns feeding as an animal grows
+// and there is a finite best size. With intake at N^1.0 against upkeep at
+// N^0.6 the ordering was inverted and growth paid without limit.
+pub const METABOLIC_EXPONENT: f32 = 0.75;
 /// Area of a typical plain body part, so charging upkeep on area rather than
 /// on a part count did not silently rescale the entire energy economy.
 pub const PART_AREA_REF: f32 = 0.49;
@@ -537,6 +557,10 @@ pub const SAND_DIG_THRESHOLD: f32 = 0.15;
 pub const CORPSE_ENERGY_PER_PIXEL: f32 = 1.4;
 pub const CORPSE_EAT_RADIUS: f32 = 1.5;
 pub const CORPSE_EAT_RATE: f32 = 0.5;
+/// How much faster a big-mouthed animal strips a carcass. Without this a whale
+/// fall worth thousands of units took thousands of animal-ticks to clear and
+/// simply sat there looking untouched.
+pub const CORPSE_BITE_PER_MOUTH: f32 = 4.0;
 pub const CORPSE_SINK_RATE: f32 = 0.05;
 
 pub const DRAG_PARALLEL: f32 = 0.05;
@@ -583,7 +607,7 @@ pub const SNOW_SOURCE_DEPTH: usize = 6;
 pub const SNOW_SINK_RATE: f32 = 0.22;
 pub const SNOW_FLOOR_DEPTH: usize = 14;
 pub const SNOW_FLOOR_DECAY: f32 = 0.06;
-pub const SNOW_PLUMES_PER_TICK: u32 = 3;
+pub const SNOW_PLUMES_PER_TICK: u32 = 5;
 /// Bloom cycle. Production is intermittent, and the intervals of NOTHING are
 /// the point: a constant drizzle is just the old always-fed world at a lower
 /// rate, whereas famine is what makes a reserve worth carrying and a bloom
@@ -604,7 +628,14 @@ pub const SNOW_BLOOM_FLOOR: f32 = 0.34;
 /// over 57600 cells, about 58 units of food per tick. Marine snow at 0.075
 /// delivered nearer 6, and the world starved to two animals in 5700 ticks.
 /// Scarcity is wanted; an empty ocean is not.
-pub const SNOW_BLOOM_STRENGTH: f32 = 0.34;
+/// Plankton is now ABUNDANT but thin. These are two different knobs and
+/// conflating them was a mistake: cutting the amount of snow in the water
+/// made food merely hard to find, and the world lived on carcasses instead.
+/// What actually produces filter feeders is dilute food in plenty of water --
+/// each mouthful worth almost nothing, so an animal has to process a great
+/// deal of water, which is exactly what puts a premium on filtering surface
+/// and therefore on being built like a filter feeder.
+pub const SNOW_BLOOM_STRENGTH: f32 = 0.85;
 
 // --- Whale fall ------------------------------------------------------------
 // A rare, enormous carcass sinking from above. A different KIND of resource
@@ -613,7 +644,12 @@ pub const SNOW_BLOOM_STRENGTH: f32 = 0.34;
 pub const WHALE_FALL_CHANCE: f32 = 0.0012;
 pub const WHALE_FALL_MIN_PARTS: u32 = 45;
 pub const WHALE_FALL_MAX_PARTS: u32 = 130;
-pub const WHALE_FALL_RICHNESS: f32 = 3.5;
+// Plankton is thin gruel and a carcass is a fortune. Widening that gap is the
+// point: two resources that reward completely different animals only matter if
+// they are genuinely different in value. A whale fall is now worth thousands
+// of times a mouthful of snow, which is what makes finding one, reaching it
+// first, and holding it worth building an animal around.
+pub const WHALE_FALL_RICHNESS: f32 = 55.0;
 pub const GRAVITY: f32 = 0.22;
 
 // Density-dependent cannibalism used to be modeled as a hardcoded PRESSURE
@@ -745,6 +781,12 @@ pub struct Corpse {
     pub local_shape: Vec<[f32; 2]>,
     pub color: [u8; 3],
     pub energy: f32,
+    /// What it started with, so a half-eaten carcass can be shown as half
+    /// eaten. Without this a corpse rendered at full size and full opacity
+    /// until the instant it vanished, which is why a whale fall looked like
+    /// it was never being consumed at all -- it was, but nothing about it
+    /// changed until it was gone.
+    pub initial_energy: f32,
 }
 
 /// First concrete step toward the "shared brain trained asynchronously on
@@ -1730,6 +1772,7 @@ impl World {
             d.set_item("positions", positions).unwrap();
             d.set_item("color", [c.color[0] as u32, c.color[1] as u32, c.color[2] as u32]).unwrap();
             d.set_item("energy", c.energy).unwrap();
+            d.set_item("energy_frac", if c.initial_energy > 0.0 { c.energy / c.initial_energy } else { 0.0 }).unwrap();
             list.append(d).unwrap();
         }
         list

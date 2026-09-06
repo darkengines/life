@@ -205,6 +205,19 @@ pub struct Individuals {
     pub kin_signature: Vec<[f32; crate::KIN_DIM]>, // heritable-with-drift "scent" -- see KIN_DIM's doc comment
     pub parent_id: Vec<i64>,        // stable id (not slot -- slots recycle) of this individual's parent, or -1 for a founder
     pub id_to_slot: std::collections::HashMap<u64, usize>, // for finding a still-alive parent by id in O(1)
+    /// Ticks of reduced selection pressure remaining, for an animal born with
+    /// a body plan meaningfully different from its parent's.
+    ///
+    /// Co-optimising a body and the brain that drives it has a known failure
+    /// mode: a mutated morphology is judged while running a controller
+    /// inherited for the OLD body, so it underperforms for reasons that have
+    /// nothing to do with whether the new shape is any good, and morphological
+    /// change is punished on arrival. Morphology then converges early on
+    /// whatever was safe, which is exactly what "the dominant creatures are
+    /// not very effective" looks like from outside. Cheney, Bongard,
+    /// SunSpiral & Lipson's answer is to protect recent morphological
+    /// innovation briefly so control has time to readapt to the new body.
+    pub innovation_protect: Vec<u32>,
     pub ticks_since_fed: Vec<u32>,  // ticks since food/predation/scavenging last succeeded -- reproduction requires this be recent
     pub ticks_since_reproduced: Vec<u32>, // females only: a real recovery period between births, like gestation/nursing
     pub pixel_offset: Vec<u32>,
@@ -237,6 +250,7 @@ fn inherit_scalar(rng: &mut Pcg64, parent_val: f32, std: f32, lo: f32, hi: f32) 
 impl Individuals {
     pub fn with_capacity(cap: usize) -> Self {
         Individuals {
+            innovation_protect: Vec::with_capacity(cap),
             alive: Vec::with_capacity(cap),
             id: Vec::with_capacity(cap),
             root_pos: Vec::with_capacity(cap),
@@ -332,6 +346,7 @@ impl Individuals {
             self.size_scale.push(1.0);
             self.kin_signature.push([0.0; crate::KIN_DIM]);
             self.parent_id.push(-1);
+            self.innovation_protect.push(0);
             self.ticks_since_fed.push(0);
             self.ticks_since_reproduced.push(u32::MAX); // never reproduced yet -- cooldown trivially satisfied
             self.pixel_offset.push(0);
@@ -522,6 +537,49 @@ pub const REST_DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
 /// Rest-pose (un-bent) integer grid position of every pixel, by walking the
 /// parent chain -- matches pixel_world.py's `_rest_grid_positions`.
+/// How much of this body is actually in contact with the water, as a sum over
+/// components of the fraction of each one's perimeter that is exposed.
+///
+/// This is the number feeding should depend on, and getting it wrong is what
+/// made body plans meaningless. Feeding was charged per COMPONENT, so intake
+/// scaled as N while upkeep scaled as N^0.6 -- benefit steeper than cost,
+/// which means more tissue always pays, anywhere, in any arrangement. Nothing
+/// an animal grew could ever be useless, so nothing was ever pruned, and shape
+/// carried no information at all.
+///
+/// Real suspension feeders do not work that way. Filtration rate scales as
+/// roughly W^0.66-0.70 across bivalves, ascidians, crustaceans, polychaetes
+/// and jellyfish, because the filtering surface is a SURFACE: gill area grows
+/// as L^2 while mass grows as L^3. Metabolism meanwhile scales as W^0.75 --
+/// steeper than intake -- which is what gives real animals a finite optimum
+/// size instead of an unbounded incentive to grow.
+///
+/// In two dimensions the analogue of surface is perimeter, and this is where
+/// it becomes interesting: a solid blob of N parts has a perimeter of about
+/// sqrt(N), while a branched or feathery body of the same mass has a perimeter
+/// of nearly N. So an animal that wants to eat plankton has to be built like
+/// something that eats plankton -- open, branched, high-surface -- and buried
+/// interior tissue earns nothing while still costing upkeep. That is exactly
+/// the pressure that keeps real anatomy free of useless bulk, and it makes
+/// topology something selection can finally see.
+pub fn exposed_surface(pixels: &PixelArena, offset: u32, count: u32) -> f32 {
+    if count == 0 { return 0.0; }
+    let grid = rest_grid_positions(pixels, offset, count);
+    let occupied: std::collections::HashSet<(i32, i32)> = grid.iter().copied().collect();
+    let mut total = 0.0;
+    for (k, &(x, y)) in grid.iter().enumerate() {
+        let open = REST_DIRECTIONS
+            .iter()
+            .filter(|(dx, dy)| !occupied.contains(&(x + dx, y + dy)))
+            .count() as f32;
+        // Weighted by how big the component is: a broad frond presents more
+        // surface to the water than a small one.
+        let g = crate::pixels::girth(pixels, offset as usize + k);
+        total += (open / 4.0) * g;
+    }
+    total
+}
+
 fn rest_grid_positions(pixels: &PixelArena, offset: u32, count: u32) -> Vec<(i32, i32)> {
     let mut pos = vec![(0i32, 0i32); count as usize];
     for k in 0..count as usize {
@@ -1031,6 +1089,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
 
     recompute_part_counts(individuals, pixels, child);
     recompute_axis_offset(individuals, pixels, child);
+    let parent_count_before = individuals.pixel_count[child];
     // Birth anomalies: the body plan can gain a part, gain a small burst of
     // them, or LOSE one. Only ever appending meant morphology crept outward in
     // unit steps and could never simplify, so shapes could not really explore.
@@ -1063,6 +1122,16 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
             grow_one_pixel_weighted(individuals, pixels, rng, child, tip_weight);
         }
     }
+    // A body plan that actually changed gets a grace period; one that merely
+    // copied its parent gets nothing. Protection is for INNOVATION, not for
+    // being young -- handing it to every newborn would just be a uniform
+    // discount and would select for nothing.
+    individuals.innovation_protect[child] =
+        if individuals.pixel_count[child] != parent_count_before {
+            crate::INNOVATION_PROTECT_TICKS
+        } else {
+            0
+        };
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to
     individuals.ticks_since_fed[child] = 0;

@@ -915,6 +915,7 @@ fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
                 local_shape,
                 color: world.individuals.color[slot],
                 energy: world.meal_energy_per_part * severed.len() as f32,
+                initial_energy: world.meal_energy_per_part * severed.len() as f32,
             });
         }
     }
@@ -1043,6 +1044,7 @@ fn kill(world: &mut World, slot: usize) {
         local_shape,
         color: world.individuals.color[slot],
         energy: world.meal_energy_per_part * count as f32,
+        initial_energy: world.meal_energy_per_part * count as f32,
     });
     world.individuals.free_slot(slot);
     world.deaths += 1;
@@ -1821,8 +1823,31 @@ pub fn tick(world: &mut World) {
             // An animal filtering water collects across its whole surface, so
             // reach scales with the body, which is also what makes being large
             // a viable way to live on plankton rather than a slow death.
+            // Intake is bounded by EXPOSED SURFACE, not by part count. See
+            // individuals::exposed_surface for why: charging feeding per
+            // component made intake scale as N against upkeep at N^0.6, so
+            // more tissue always paid, in any arrangement, and no structure an
+            // animal grew could ever be useless. Real filtration scales as
+            // roughly W^0.66-0.70 -- shallower than metabolism's W^0.75 --
+            // which is what gives real animals a finite best size instead of
+            // an unbounded reason to grow.
             let mut eaten = 0.0f32;
-            let per_part = crate::GRAZE_PER_PART_RATE * world.individuals.size_scale[slot];
+            let surface = crate::individuals::exposed_surface(
+                &world.pixels,
+                world.individuals.pixel_offset[slot],
+                world.individuals.pixel_count[slot],
+            ) * world.individuals.size_scale[slot];
+            // A mouth or a filter mesh is a feeding surface; plain flank is
+            // not. Structural tissue can still absorb a little -- small
+            // animals really do -- but an animal that wants to live on
+            // plankton has to grow the apparatus for it.
+            let feeding_organs = organ_area(world, slot, crate::pixels::PART_FILTER)
+                + organ_area(world, slot, crate::pixels::PART_MOUTH) * 0.4;
+            let intake_capacity = (surface * crate::GRAZE_SURFACE_RATE
+                + feeding_organs * crate::GRAZE_ORGAN_RATE)
+                .max(0.0);
+            let n_cells = world.individuals.pixel_count[slot].max(1) as f32;
+            let per_part = intake_capacity / n_cells;
             let owned_g;
             let graze_pos: &[[f32; 2]] = match &pos_cache[slot] {
                 Some(v) if v.len() == world.individuals.pixel_count[slot] as usize => v,
@@ -1849,7 +1874,7 @@ pub fn tick(world: &mut World) {
                 eaten += take;
             }
             world.individuals.energy[slot] +=
-                eaten * 5.0 * graze_efficiency * digestion_multiplier(world, slot);
+                eaten * crate::PLANKTON_CALORIES * graze_efficiency * digestion_multiplier(world, slot);
             world.individuals.ticks_since_fed[slot] += 1;
             if eaten > 0.001 {
                 world.individuals.ticks_since_fed[slot] = 0;
@@ -1871,7 +1896,20 @@ pub fn tick(world: &mut World) {
                 // its cap in every lineage and the whole mechanism below
                 // would quietly stop mattering.
                 + crate::DISEASE_RESISTANCE_METABOLIC_COST * world.individuals.disease_resistance[slot];
-            world.individuals.energy[slot] -= metabolism * world.metabolism_multiplier;
+            // A body plan that has just changed is shielded briefly. Its
+            // controller was inherited for the OLD body and has not had a
+            // chance to adapt, so judging it at full pressure punishes
+            // morphological innovation for a reason that says nothing about
+            // whether the new shape is any good -- which is how morphology
+            // converges early on whatever was safe and stops exploring.
+            let protect = world.individuals.innovation_protect[slot];
+            let pressure = if protect > 0 {
+                world.individuals.innovation_protect[slot] = protect - 1;
+                crate::INNOVATION_PROTECT_METABOLISM
+            } else {
+                1.0
+            };
+            world.individuals.energy[slot] -= metabolism * world.metabolism_multiplier * pressure;
 
             // Energy is now BOUNDED by what the body can actually hold.
             // Before this an animal simply accumulated without limit -- one
@@ -1946,7 +1984,7 @@ pub fn tick(world: &mut World) {
                 let mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
                 world.individuals.energy[slot] -=
                     crate::SPACE_PRESSURE_ENERGY_COST * over * over * (1.0 + mass * crate::CROWDING_SIZE_FACTOR);
-                let risk = (world.space_pressure_mortality * over * over)
+                let risk = (world.space_pressure_mortality * over * over * pressure)
                     .min(crate::SPACE_PRESSURE_MORTALITY_MAX);
                 if risk > 0.0 && world.rng.random::<f32>() < risk {
                     kill(world, slot);
@@ -2222,6 +2260,7 @@ pub fn tick(world: &mut World) {
             local_shape: shape,
             color: [232, 228, 214],
             energy: world.meal_energy_per_part * parts as f32 * crate::WHALE_FALL_RICHNESS,
+            initial_energy: world.meal_energy_per_part * parts as f32 * crate::WHALE_FALL_RICHNESS,
         });
         world.whale_falls += 1;
     }
@@ -2597,14 +2636,37 @@ fn scavenge_all(world: &mut World, deciding: &[usize]) {
     for &slot in deciding {
         if !world.individuals.alive[slot] { continue; }
         let pos = world.individuals.root_pos[slot];
+        // Scavenging needs a mouth, like every other way of eating.
+        let mouths = world.individuals.part_counts[slot][crate::pixels::PART_MOUTH as usize];
+        if mouths == 0 { continue; }
+        // A bigger mouth takes a bigger bite. A flat rate meant an enormous
+        // carcass took the same thousands of animal-ticks to strip whatever
+        // was eating it, so a whale fall sat there apparently untouched.
+        let bite_rate = crate::CORPSE_EAT_RATE
+            * (1.0 + organ_area(world, slot, crate::pixels::PART_MOUTH) * crate::CORPSE_BITE_PER_MOUTH);
+        let size = world.size as f32;
         for c in world.corpses.iter_mut() {
             if c.energy <= 0.0 { continue; }
-            if dist(c.root_pos, pos) < crate::CORPSE_EAT_RADIUS {
-                let bite = c.energy.min(crate::CORPSE_EAT_RATE);
+            // Wrapped: the world is a cylinder, and a carcass just across the
+            // seam is right next to you, not half a world away.
+            if dist_wrapped(c.root_pos, pos, size) < crate::CORPSE_EAT_RADIUS {
+                let bite = c.energy.min(bite_rate);
                 c.energy -= bite;
                 world.individuals.energy[slot] += bite;
                 world.individuals.ticks_since_fed[slot] = 0;
                 world.scavenged += 1;
+                // A carcass visibly goes as it is eaten. Its energy was
+                // dropping all along, but nothing about it changed on screen
+                // until it vanished outright, so a whale fall looked like it
+                // was never being consumed. Now the remains shrink to match
+                // what is left of them.
+                if c.initial_energy > 0.0 && !c.local_shape.is_empty() {
+                    let frac = (c.energy / c.initial_energy).clamp(0.0, 1.0);
+                    let want = ((c.local_shape.len() as f32) * frac).ceil() as usize;
+                    if want < c.local_shape.len() {
+                        c.local_shape.truncate(want.max(1));
+                    }
+                }
                 break;
             }
         }
