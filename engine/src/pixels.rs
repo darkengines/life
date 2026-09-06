@@ -60,6 +60,15 @@ pub struct PixelArena {
     // evolvable rather than universal, because a pair costs twice the upkeep
     // and is only worth it where balanced propulsion or stereo sensing pays.
     pub symmetric: Vec<bool>,
+    /// +1 for a part, -1 for its mirrored twin.
+    ///
+    /// Bilateral symmetry only cancels sideways forces if the two sides beat
+    /// in MIRROR IMAGE. Giving a twin the same wave value made both sides bend
+    /// the same way, so their lateral thrust added instead of cancelling and a
+    /// symmetric body span almost as much as a lopsided one (measured: only
+    /// 1.12x less). Negating the wave on one side is what makes a bilateral
+    /// body actually swim straight.
+    pub mirror_sign: Vec<f32>,
     free_blocks: Vec<(u32, u32)>, // (offset, length), kept sorted by offset
 }
 
@@ -81,6 +90,7 @@ impl PixelArena {
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
             part_type: Vec::new(),
             symmetric: Vec::new(),
+            mirror_sign: Vec::new(),
             free_blocks: Vec::new(),
         }
     }
@@ -109,6 +119,7 @@ impl PixelArena {
         self.health.resize(new_len as usize, crate::BASE_PIXEL_HEALTH);
         self.part_type.resize(new_len as usize, PART_BODY);
         self.symmetric.resize(new_len as usize, false);
+        self.mirror_sign.resize(new_len as usize, 1.0);
         offset
     }
 

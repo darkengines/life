@@ -203,7 +203,15 @@ def main():
         for step in range(STEPS_PER_ROUND):
             i = torch.randint(0, len(S_t), (min(BATCH, len(S_t)),), device=dev)
             _z, pred_next, pred_r = model(S_t[i], A_t[i])
-            state_loss = nn.functional.mse_loss(pred_next, S2_t[i])
+            # Predict the CHANGE, not the next absolute state. Predicting the
+            # absolute vector is dominated by "it is almost the same as now",
+            # which a 12-dimensional latent bottleneck physically cannot
+            # reproduce -- so the model scored WORSE than a do-nothing
+            # baseline (0.67x) while actually learning fine. The delta is the
+            # part that carries information, and it forces the latent to
+            # encode what varies rather than spending capacity echoing the
+            # present.
+            state_loss = nn.functional.mse_loss(pred_next, S2_t[i] - S_t[i])
             reward_loss = nn.functional.mse_loss(pred_r, R_t[i])
             # Advantage-weighted regression: imitate the actions that were
             # actually followed by good outcomes, weighted by how good. This
@@ -229,7 +237,8 @@ def main():
         # combined figure carries the reward term too, so a perfectly healthy
         # state prediction looked like a regression.
         with torch.no_grad():
-            naive = float(nn.functional.mse_loss(S_t, S2_t).item())
+            # Matching baseline: predicting no change at all.
+            naive = float((S2_t - S_t).pow(2).mean().item())
             reward_var = float(R_t.var().item())
 
         def cpu(t):

@@ -435,6 +435,12 @@ pub const CORPSE_SINK_RATE: f32 = 0.05;
 
 pub const DRAG_PARALLEL: f32 = 0.05;
 pub const DRAG_PERPENDICULAR: f32 = 0.4;
+// Per-part multiplier on perpendicular drag, indexed by part kind (body, eye,
+// mouth, gut, tentacle, armor, flipper). A flipper is a paddle and grips the
+// water hard when swept; a tentacle is soft and slips through it; armour is a
+// broad plate. This is what makes fins an organ that propels rather than a
+// number that scales.
+pub const PART_DRAG_PERP: [f32; 7] = [1.0, 1.0, 1.0, 1.0, 0.6, 1.5, 3.2];
 pub const LINEAR_DAMPING: f32 = 0.25;
 pub const TURN_RATE: f32 = 0.12;
 pub const MAX_SPEED: f32 = 3.0;
@@ -648,6 +654,13 @@ pub struct World {
     /// Runtime-overridable GROWTH_STRAIGHT_TIP_WEIGHT, so the morphology
     /// pressure that biases bodies toward elongation can be swept.
     pub growth_tip_weight: f32,
+    /// Test-only: when set, forces (turn_curvature, swim_gain) every tick
+    /// so the brain cannot reshape the body. Without this, measuring
+    /// propulsion is confounded -- the brain senses different things at
+    /// different orientations and curves the body differently, so an
+    /// IDENTICAL body produced thrust varying from 0 to 13.7 across
+    /// headings, which looks like broken physics but is just behaviour.
+    pub freeze_locomotion: Option<(f32, f32)>,
     /// Runtime-overridable GRAVITY, so locomotion can be probed in
     /// isolation without sinking confounding the measurement.
     pub gravity: f32,
@@ -723,6 +736,7 @@ impl World {
             graze_mass_ref: GRAZE_MASS_REF,
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
+            freeze_locomotion: None,
             gravity: GRAVITY,
             shared_enc_w,
             shared_enc_b,
@@ -1073,6 +1087,7 @@ impl World {
             // refuses to serialize -- every publish then failed and the live
             // page froze at tick 0 while the simulation itself ran on fine.
             let part_type: Vec<u32> = (0..count).map(|k| self.pixels.part_type[offset + k] as u32).collect();
+            let mirror_sign: Vec<f32> = (0..count).map(|k| self.pixels.mirror_sign[offset + k]).collect();
             let health_frac: Vec<f32> = (0..count).map(|k| {
                 let max_health = BASE_PIXEL_HEALTH * self.pixels.size[offset + k];
                 if max_health > 0.0 { (self.pixels.health[offset + k] / max_health).clamp(0.0, 1.0) } else { 1.0 }
@@ -1088,6 +1103,7 @@ impl World {
             d.set_item("storage", storage).unwrap();
             d.set_item("part_size", part_size).unwrap();
             d.set_item("part_type", part_type).unwrap();
+            d.set_item("mirror_sign", mirror_sign).unwrap();
             d.set_item("health_frac", health_frac).unwrap();
             d.set_item("captured", captured_slots.contains(&slot)).unwrap();
             let c = self.individuals.color[slot];
@@ -1182,6 +1198,28 @@ impl World {
         d.set_item("latent_dim", individuals::LATENT_DIM).unwrap();
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
+    }
+
+    /// Test-only: forces every part of a body to be symmetric (or not), so a
+    /// bilateral and a lopsided body plan can be compared directly.
+    fn debug_set_symmetry(&mut self, id: u64, symmetric: bool) -> bool {
+        match self.individuals.id_to_slot.get(&id) {
+            Some(&slot) if self.individuals.alive[slot] => {
+                let off = self.individuals.pixel_offset[slot] as usize;
+                let n = self.individuals.pixel_count[slot] as usize;
+                for k in 0..n {
+                    self.pixels.symmetric[off + k] = symmetric;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Test-only: pins body curvature and swim effort, taking the brain out
+    /// of the loop so propulsion can be measured on its own.
+    fn debug_freeze_locomotion(&mut self, curvature: f32, swim_gain: f32) {
+        self.freeze_locomotion = Some((curvature, swim_gain));
     }
 
     /// Test-only: overrides how strongly growth prefers extending a tip.

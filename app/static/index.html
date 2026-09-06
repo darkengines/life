@@ -752,7 +752,9 @@ function fkPositions(ind, simTime, rootPos, heading) {
   }
   const headingAdj = heading - (ind.axis_offset || 0);
   for (let k = 0; k < n; k++) {
-    const wave = flex[k] * amp * Math.sin(2 * Math.PI * freq * simTime + phase + depth[k] * 0.7)
+    // Mirrored twins beat in mirror image; must match the engine.
+    const ms = (ind.mirror_sign && ind.mirror_sign[k] !== undefined) ? ind.mirror_sign[k] : 1;
+    const wave = ms * flex[k] * amp * Math.sin(2 * Math.PI * freq * simTime + phase + depth[k] * 0.7)
       + (ind.turn_curvature || 0) * flex[k];
     const parent = ind.parents[k];
     const segLen = sizeScale * (partSize[k] !== undefined ? partSize[k] : 1.0);

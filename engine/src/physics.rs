@@ -94,7 +94,8 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // curved body pushes water to one side, which is what produces the
         // torque that turns it -- the animal steers by SHAPING ITSELF, not by
         // having its orientation overwritten.
-        let raw_wave = flex * amp * (std::f32::consts::TAU * freq * t + phase + depth[k] * crate::BODY_WAVE_NUMBER).sin()
+        let raw_wave = world.pixels.mirror_sign[offset + k] * flex * amp
+            * (std::f32::consts::TAU * freq * t + phase + depth[k] * crate::BODY_WAVE_NUMBER).sin()
             + world.individuals.turn_curvature[slot] * flex;
         // Joint angle limits: a real hinge constraint on how far THIS
         // joint's animated bend can deviate from its rest pose, heritable
@@ -166,8 +167,17 @@ pub fn fluid_thrust_torque(world: &World, slot: usize, pos: &[[f32; 2]], vel: &[
         let v_par = vx * tx + vy * ty;
         let (vparx, vpary) = (v_par * tx, v_par * ty);
         let (vperpx, vperpy) = (vx - vparx, vy - vpary);
-        let fx = -(crate::DRAG_PARALLEL * vparx + crate::DRAG_PERPENDICULAR * vperpx) * seg_len;
-        let fy = -(crate::DRAG_PARALLEL * vpary + crate::DRAG_PERPENDICULAR * vperpy) * seg_len;
+        // Drag anisotropy is a property of the PART, not a global constant.
+        // A fin is a paddle: it presents a broad face to the water when swept
+        // sideways, which is exactly how a real animal converts body motion
+        // into thrust. Making flippers merely multiply whole-body thrust made
+        // them a stat rather than an organ; giving them their own
+        // perpendicular drag means a finned body genuinely pushes more water
+        // per stroke, and where the fins sit on the body matters.
+        let perp = crate::DRAG_PERPENDICULAR
+            * crate::PART_DRAG_PERP[world.pixels.part_type[offset + k] as usize];
+        let fx = -(crate::DRAG_PARALLEL * vparx + perp * vperpx) * seg_len;
+        let fy = -(crate::DRAG_PARALLEL * vpary + perp * vperpy) * seg_len;
         force[0] += fx;
         force[1] += fy;
         // r x F, about the root, for the 2D scalar torque.
@@ -551,6 +561,7 @@ fn remove_pixel(world: &mut World, slot: usize, local_idx: u32) -> bool {
         world.pixels.storage[(new_offset + w) as usize] = world.pixels.storage[(offset + k) as usize];
         world.pixels.part_type[(new_offset + w) as usize] = world.pixels.part_type[(offset + k) as usize];
         world.pixels.symmetric[(new_offset + w) as usize] = world.pixels.symmetric[(offset + k) as usize];
+        world.pixels.mirror_sign[(new_offset + w) as usize] = world.pixels.mirror_sign[(offset + k) as usize];
         world.pixels.size[(new_offset + w) as usize] = world.pixels.size[(offset + k) as usize];
         world.pixels.min_angle[(new_offset + w) as usize] = world.pixels.min_angle[(offset + k) as usize];
         world.pixels.max_angle[(new_offset + w) as usize] = world.pixels.max_angle[(offset + k) as usize];
@@ -1036,6 +1047,13 @@ pub fn tick(world: &mut World) {
             let posture_bias = d[crate::individuals::TURN_BIAS_IDX] * crate::TURN_POSTURE_BIAS_SCALE;
             world.individuals.turn_curvature[slot] =
                 (directional_steer + posture_bias).clamp(-1.0, 1.0) * crate::TURN_CURVATURE_SCALE;
+
+            // Test hook: hold the body's shape fixed so propulsion can be
+            // measured without the brain reshaping it every tick.
+            if let Some((c, g)) = world.freeze_locomotion {
+                world.individuals.turn_curvature[slot] = c;
+                world.individuals.swim_gain[slot] = g;
+            }
 
             let inertia = (body_size_sum(world, slot) * world.individuals.size_scale[slot]).max(1.0)
                 * crate::ROTATIONAL_INERTIA;

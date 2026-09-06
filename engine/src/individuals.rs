@@ -525,10 +525,18 @@ pub fn recompute_axis_offset(individuals: &mut Individuals, pixels: &PixelArena,
     // grid[0] is the root by construction.
     let (rx, ry) = (grid[0].0 as f32, grid[0].1 as f32);
     let (dx, dy) = (cx - rx, cy - ry);
+    // Forward is from the body's mass toward the ROOT -- the root leads, the
+    // rest trails behind it. Defining it the other way round (root toward
+    // centroid) meant "forward" pointed into the body, so every creature swam
+    // tail-first, which is exactly what was observed by eye. Measured with the
+    // brain frozen out: thrust is perfectly locked to the body (R=1.000) and
+    // pointed +162.6 degrees away from the old convention, and across fifteen
+    // different body plans every one that produced meaningful thrust clustered
+    // at 170-180 degrees. One convention error, one sign.
     individuals.axis_offset[slot] = if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
         0.0
     } else {
-        dy.atan2(dx)
+        (-dy).atan2(-dx)
     };
 }
 
@@ -625,6 +633,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.health[new_offset as usize + k] = pixels.health[offset as usize + k];
         pixels.part_type[new_offset as usize + k] = pixels.part_type[offset as usize + k];
         pixels.symmetric[new_offset as usize + k] = pixels.symmetric[offset as usize + k];
+        pixels.mirror_sign[new_offset as usize + k] = pixels.mirror_sign[offset as usize + k];
     }
     let parent_flex = pixels.flex[new_offset as usize + parent_local];
     let parent_storage = pixels.storage[new_offset as usize + parent_local];
@@ -681,6 +690,9 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.max_angle[m] = -pixels.min_angle[t];
         pixels.health[m] = pixels.health[t];
         pixels.symmetric[m] = pixels.symmetric[t];
+        // The twin undulates in mirror image, which is what makes the pair's
+        // sideways thrust cancel and the body swim straight.
+        pixels.mirror_sign[m] = -pixels.mirror_sign[t];
     }
 
     if count > 0 {
@@ -781,6 +793,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
         pixels.storage[new_offset as usize + k] = pixels.storage[parent_offset as usize + k];
         pixels.part_type[new_offset as usize + k] = pixels.part_type[parent_offset as usize + k];
         pixels.symmetric[new_offset as usize + k] = pixels.symmetric[parent_offset as usize + k];
+        pixels.mirror_sign[new_offset as usize + k] = pixels.mirror_sign[parent_offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[parent_offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[parent_offset as usize + k];
         pixels.max_angle[new_offset as usize + k] = pixels.max_angle[parent_offset as usize + k];
