@@ -41,7 +41,10 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
     let offset = world.individuals.pixel_offset[slot] as usize;
     let count = world.individuals.pixel_count[slot] as usize;
     let heading = world.individuals.heading[slot];
-    let amp = world.individuals.bend_amplitude[slot];
+    // Undulation amplitude is the evolved body rhythm scaled by how hard the
+    // brain has decided to swim right now -- genetics sets the stroke, the
+    // mind sets the effort.
+    let amp = world.individuals.bend_amplitude[slot] * world.individuals.swim_gain[slot];
     let freq = world.individuals.bend_frequency[slot];
     let phase = world.individuals.bend_phase[slot];
     // Growth is pure inflation, never new anatomy: the body PLAN (this joint
@@ -702,6 +705,7 @@ pub fn tick(world: &mut World) {
         let mut released = false;
         if world.individuals.energy[target] <= 0.0 {
             kill(world, target);
+            world.deaths_predation += 1;
             world.individuals.attached_to[slot] = -1;
             released = true;
         }
@@ -763,6 +767,7 @@ pub fn tick(world: &mut World) {
                     world.fields.blood[idx] += crate::BLOOD_EMIT_ON_HIT;
                     if died {
                         kill(world, target);
+            world.deaths_predation += 1;
                         world.individuals.attached_to[slot] = -1;
                     }
                 }
@@ -896,6 +901,12 @@ pub fn tick(world: &mut World) {
             ((excess / crate::PATHOGEN_SHARE_SCALE).powi(2)).min(crate::PATHOGEN_PRESSURE_MAX);
         let (move_x, move_y, reproduce_urge, fight_urge, crawl_intent, acid_intent, light_intent) =
             (d[0], d[1], d[2], d[3], d[4], d[5], d[6]);
+        // Swim effort: tanh output remapped onto a positive gain, so a brain
+        // can idle to save energy or drive its body hard. Applied to the NEXT
+        // tick's kinematics, since this tick's positions were already cached.
+        let effort = (d[crate::individuals::SWIM_EFFORT_IDX] * 0.5 + 0.5).clamp(0.0, 1.0);
+        world.individuals.swim_gain[slot] =
+            crate::SWIM_GAIN_MIN + effort * (crate::SWIM_GAIN_MAX - crate::SWIM_GAIN_MIN);
         {
             let offset = world.individuals.pixel_offset[slot] as usize;
             world.pixels.memory[offset] = [d[7], d[8], d[9], d[10]];
@@ -1045,7 +1056,11 @@ pub fn tick(world: &mut World) {
             world.individuals.velocity[slot] = new_vel;
             world.individuals.root_pos[slot] = new_pos;
             let speed_final = (new_vel[0] * new_vel[0] + new_vel[1] * new_vel[1]).sqrt();
-            world.individuals.energy[slot] -= crate::MOVE_COST * speed_final;
+            // Effort costs. Driving the body hard is superlinearly expensive,
+            // so sprinting is a real decision with a real price rather than a
+            // free setting every creature would simply max out.
+            let effort_cost = world.individuals.swim_gain[slot] * world.individuals.swim_gain[slot];
+            world.individuals.energy[slot] -= crate::MOVE_COST * speed_final * effort_cost;
         }
 
         if world.individuals.alive[slot] && !is_captured {
@@ -1277,6 +1292,7 @@ pub fn tick(world: &mut World) {
 
         if world.individuals.alive[slot] && world.individuals.energy[slot] <= 0.0 {
             kill(world, slot);
+            world.deaths_starved += 1;
         }
     }
 
@@ -1295,6 +1311,7 @@ pub fn tick(world: &mut World) {
         alive.sort_by(|&a, &b| world.individuals.energy[b].partial_cmp(&world.individuals.energy[a]).unwrap());
         for &slot in alive.iter().skip(world.pop_cap) {
             world.individuals.free_slot(slot); // over-cap cull: no corpse, matches Python's cap enforcement
+            world.deaths_popcap += 1;
         }
     }
     timings.push(("pop_cap", t0.elapsed().as_secs_f64() * 1000.0));
@@ -1463,6 +1480,7 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
                 world.fields.blood[eidx] += crate::BLOOD_EMIT_ON_DEATH;
                 world.fights += 1;
                 kill(world, other);
+            world.deaths_predation += 1;
                 victims += 1;
                 if victims >= max_targets { return; }
                 continue;
@@ -1484,6 +1502,7 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
                 let died = remove_pixel(world, other, j as u32);
                 if died {
                     kill(world, other);
+            world.deaths_predation += 1;
                     world.fields.blood[idx] += crate::BLOOD_EMIT_ON_DEATH;
                 }
             }

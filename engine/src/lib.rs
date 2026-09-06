@@ -498,6 +498,12 @@ pub const REWARD_REPRODUCE: f32 = 1.0;
 // variation selection needs would be gone, which would trade evolution away
 // for learning instead of combining them.
 pub const POLICY_DISTILL_RATE: f32 = 0.25;
+// Range of brain-controlled swimming effort. The floor is above zero because
+// a body still drifts and flexes when idling; the ceiling is a genuine
+// sprint. Cost rises with the square of the gain, so maxing it out is only
+// worth it when something is actually at stake.
+pub const SWIM_GAIN_MIN: f32 = 0.15;
+pub const SWIM_GAIN_MAX: f32 = 1.9;
 
 pub const WEATHER_TRIGGER_CHANCE: f64 = 0.0006;
 
@@ -571,6 +577,13 @@ pub struct World {
     pub fights: u64,
     pub deaths: u64,
     pub scavenged: u64,
+    // What creatures actually die OF. Without this, "is there real
+    // survivability pressure?" is guesswork -- a world where nearly everything
+    // dies of old age or starvation is one where behaviour barely matters,
+    // and no amount of brain capacity will make intelligence impactful.
+    pub deaths_starved: u64,
+    pub deaths_predation: u64,
+    pub deaths_popcap: u64,
 
     pub timings: Vec<(&'static str, f64)>, // (phase, milliseconds) for the most recent tick -- diagnostic only
 
@@ -649,6 +662,9 @@ impl World {
             fights: 0,
             deaths: 0,
             scavenged: 0,
+            deaths_starved: 0,
+            deaths_predation: 0,
+            deaths_popcap: 0,
             food_regrow_rate,
             food_cap,
             timings: Vec::new(),
@@ -913,6 +929,9 @@ impl World {
         d.set_item("fights", self.fights).unwrap();
         d.set_item("deaths", self.deaths).unwrap();
         d.set_item("scavenged", self.scavenged).unwrap();
+        d.set_item("starved", self.deaths_starved).unwrap();
+        d.set_item("eaten", self.deaths_predation).unwrap();
+        d.set_item("culled", self.deaths_popcap).unwrap();
         d
     }
     fn weather_name(&self) -> Option<&'static str> {
@@ -1033,6 +1052,9 @@ impl World {
             d.set_item("bend_frequency", self.individuals.bend_frequency[slot]).unwrap();
             d.set_item("bend_phase", self.individuals.bend_phase[slot]).unwrap();
             d.set_item("heading", self.individuals.heading[slot]).unwrap();
+            // The frontend reconstructs bodies with the same FK formula, so it
+            // needs the same effort value or its animation desynchronises.
+            d.set_item("swim_gain", self.individuals.swim_gain[slot]).unwrap();
             // bite_force/toughness/stickiness/weight_transmission_rate/
             // crawl_affinity/acid_secretion/light_emission deliberately are
             // NOT here: the frontend never reads them per-individual (only

@@ -641,7 +641,10 @@ function fkPositions(ind, simTime, rootPos, heading) {
   const restAngle = ind.rest_angle || ind.positions.map(() => 0.0);
   const partSize = ind.part_size || ind.positions.map(() => 1.0);
   const sizeScale = ind.size_scale || 1.0;
-  const amp = ind.bend_amplitude || 0;
+  // Must mirror the engine exactly: undulation amplitude is the evolved
+  // rhythm scaled by how hard the brain has decided to swim. Omitting this
+  // would desynchronise the rendered animation from the simulation.
+  const amp = (ind.bend_amplitude || 0) * (ind.swim_gain === undefined ? 1 : ind.swim_gain);
   const freq = ind.bend_frequency || 0;
   const phase = ind.bend_phase || 0;
   const angles = new Array(n);

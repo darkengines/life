@@ -34,8 +34,16 @@ pub const HIDDEN_DIM: usize = 12;
 /// parameters roughly in half, so mutation has far less to search.
 pub const LATENT_DIM: usize = 12;
 // [move_x, move_y, reproduce_urge, fight_urge, crawl_intent, acid_intent,
-//  light_intent, *new_memory]
-pub const ACT_DIM: usize = 7 + MEM_DIM;
+//  light_intent, swim_effort, *new_memory]
+//
+// swim_effort is what finally gives a brain real agency over its own body.
+// Until it existed, undulation was driven purely by the evolved constants
+// bend_amplitude/bend_frequency, so a creature swam at a fixed genetic rate
+// and the brain could only STEER -- it could not accelerate toward prey,
+// sprint away from a predator, or stop to conserve energy. That is almost
+// certainly why fleeing never evolved at all: there was no way to flee.
+pub const ACT_DIM: usize = 8 + MEM_DIM;
+pub const SWIM_EFFORT_IDX: usize = 7;
 pub const FIGHT_URGE_IDX: usize = 3;
 
 pub struct Individuals {
@@ -86,6 +94,11 @@ pub struct Individuals {
     // DISEASE_RESISTANCE_METABOLIC_COST), so maxing it isn't free and the
     // arms race stays open rather than resolving to "everyone immune".
     pub disease_resistance: Vec<f32>,
+    // How hard this individual is currently swimming, set from its own brain
+    // output each tick (see SWIM_EFFORT_IDX). Multiplies the undulation
+    // amplitude in the forward-kinematics pass, so it feeds straight through
+    // to thrust. State, not genome.
+    pub swim_gain: Vec<f32>,
     // Cached count of each body-part kind (see pixels.rs). Derived data, not
     // genome: recomputed only when a body actually changes (birth, growth, a
     // part bitten off), so the per-tick effect lookups stay O(1) instead of
@@ -175,6 +188,7 @@ impl Individuals {
             territoriality: Vec::with_capacity(cap),
             home_pos: Vec::with_capacity(cap),
             disease_resistance: Vec::with_capacity(cap),
+            swim_gain: Vec::with_capacity(cap),
             part_counts: Vec::with_capacity(cap),
             pending_reward: Vec::with_capacity(cap),
             memory_transmission_rate: Vec::with_capacity(cap),
@@ -229,6 +243,7 @@ impl Individuals {
             self.territoriality.push(0.0);
             self.home_pos.push([0.0, 0.0]);
             self.disease_resistance.push(0.0);
+            self.swim_gain.push(1.0);
             self.part_counts.push([0; crate::pixels::PART_KIND_COUNT as usize]);
             self.pending_reward.push(0.0);
             self.memory_transmission_rate.push(0.0);
