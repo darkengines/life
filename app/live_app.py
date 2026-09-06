@@ -19,6 +19,8 @@ VAR = ROOT / "var"
 STATE_PATH = VAR / "_live_state.json"
 STATIC_STATE_PATH = VAR / "_static_state.json"
 FIELD_STATE_PATH = VAR / "_field_state.json"
+BRAIN_REQUEST_PATH = VAR / "_brain_request.json"
+BRAIN_STATE_PATH = VAR / "_brain_state.json"
 RESET_PATH = VAR / "_reset_request"
 SPEED_PATH = VAR / "_speed_control.json"
 FOOD_DROP_PATH = VAR / "_food_drops.json"
@@ -54,6 +56,23 @@ def get_state():
 @app.get("/static_state")
 def get_static_state():
     return Response(content=_read_runtime_bytes(STATIC_STATE_PATH, _EMPTY_STATIC_STATE), media_type="application/json")
+
+
+@app.get("/brain")
+def get_brain():
+    """The selected specimen's live brain state, republished every cycle."""
+    return Response(content=_read_runtime_bytes(BRAIN_STATE_PATH, b"null"),
+                    media_type="application/json")
+
+
+@app.post("/select/{ident}")
+def select_specimen(ident: int):
+    """Names the specimen whose brain should be streamed. One at a time: this
+    is for looking closely at an animal, not for watching the whole world."""
+    tmp = BRAIN_REQUEST_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"id": ident}))
+    tmp.replace(BRAIN_REQUEST_PATH)
+    return {"ok": True, "id": ident}
 
 
 @app.get("/fields")

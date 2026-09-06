@@ -562,13 +562,48 @@ pub const CONTACT_CORRECTION_MAX: f32 = 0.6;
 // because undulation puts limbs inside stone with no translation at all.
 pub const TERRAIN_REPULSION_RANGE: f32 = 1.4;
 pub const TERRAIN_REPULSION_STIFFNESS: f32 = 3.0;
-/// Terrain and gravity both belong to a world that has a bottom. The world's
-/// edges are now joined, so it has none: "down" wraps round to "up", a
-/// seafloor is a band across the middle of nothing, and rock rising from it is
-/// anchored to nothing. Both switched off together -- leaving gravity on
-/// without a floor would simply rain every animal through the seam forever.
-pub const TERRAIN_ENABLED: bool = false;
-pub const GRAVITY: f32 = 0.0;
+/// The seafloor is back, and gravity with it, because the world is a cylinder
+/// again: left and right are joined but top and bottom are not, so there is a
+/// real surface and a real bottom. Rock stays off -- what was asked for was the
+/// floor, not the boulder fields.
+pub const TERRAIN_ENABLED: bool = true;
+pub const ROCK_ENABLED: bool = false;
+
+// --- Marine snow -----------------------------------------------------------
+// Plankton enters at the lit surface and sinks. How deep the source band is,
+// how fast the snow falls, and how quickly what reaches the bottom is lost.
+// The floor decay matters: without it the seafloor becomes a reservoir and
+// the world is back to permanent food patches, just lower down.
+pub const SNOW_SOURCE_DEPTH: usize = 6;
+pub const SNOW_SINK_RATE: f32 = 0.22;
+pub const SNOW_FLOOR_DEPTH: usize = 14;
+pub const SNOW_FLOOR_DECAY: f32 = 0.06;
+pub const SNOW_PLUMES_PER_TICK: u32 = 3;
+/// Bloom cycle. Production is intermittent, and the intervals of NOTHING are
+/// the point: a constant drizzle is just the old always-fed world at a lower
+/// rate, whereas famine is what makes a reserve worth carrying and a bloom
+/// worth finding. Two periods beating against each other so the rhythm does
+/// not become something a lineage can simply time.
+pub const SNOW_BLOOM_PERIOD_A: f32 = 1900.0;
+pub const SNOW_BLOOM_PERIOD_B: f32 = 730.0;
+/// Below this the water is barren -- a real famine, not a lull.
+pub const SNOW_BLOOM_FLOOR: f32 = 0.34;
+/// Peak plankton input per plume. Calibrated against what the old
+/// regrow-in-place field actually delivered: roughly 0.001 per cell per tick
+/// over 57600 cells, about 58 units of food per tick. Marine snow at 0.075
+/// delivered nearer 6, and the world starved to two animals in 5700 ticks.
+/// Scarcity is wanted; an empty ocean is not.
+pub const SNOW_BLOOM_STRENGTH: f32 = 0.34;
+
+// --- Whale fall ------------------------------------------------------------
+// A rare, enormous carcass sinking from above. A different KIND of resource
+// from marine snow: snow rewards steady filtering along the drift, a carcass
+// rewards noticing one, reaching it fast, and holding it against competitors.
+pub const WHALE_FALL_CHANCE: f32 = 0.0012;
+pub const WHALE_FALL_MIN_PARTS: u32 = 45;
+pub const WHALE_FALL_MAX_PARTS: u32 = 130;
+pub const WHALE_FALL_RICHNESS: f32 = 3.5;
+pub const GRAVITY: f32 = 0.22;
 
 // Density-dependent cannibalism used to be modeled as a hardcoded PRESSURE
 // added straight to fight_urge once local density crossed a threshold --
@@ -766,6 +801,7 @@ pub struct World {
     /// visible whether crowding is actually regulating the population or just
     /// adding noise to the other causes.
     pub deaths_crowding: u64,
+    pub whale_falls: u64,
 
     pub timings: Vec<(&'static str, f64)>, // (phase, milliseconds) for the most recent tick -- diagnostic only
 
@@ -816,6 +852,10 @@ pub struct World {
     /// bites can be swept rather than guessed.
     pub space_pressure_tolerance: f32,
     pub space_pressure_mortality: f32,
+    /// Runtime-overridable marine snow, so how much plankton the ocean
+    /// actually produces can be calibrated rather than guessed.
+    pub snow_strength: f32,
+    pub snow_plumes: u32,
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
@@ -908,6 +948,7 @@ impl World {
             deaths_predation: 0,
             deaths_popcap: 0,
             deaths_crowding: 0,
+            whale_falls: 0,
             food_regrow_rate,
             food_cap,
             timings: Vec::new(),
@@ -924,6 +965,8 @@ impl World {
             brain_noise: 0.0,
             space_pressure_tolerance: SPACE_PRESSURE_TOLERANCE,
             space_pressure_mortality: SPACE_PRESSURE_MORTALITY,
+            snow_strength: SNOW_BLOOM_STRENGTH,
+            snow_plumes: SNOW_PLUMES_PER_TICK,
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
@@ -1193,6 +1236,7 @@ impl World {
         d.set_item("eaten", self.deaths_predation).unwrap();
         d.set_item("culled", self.deaths_popcap).unwrap();
         d.set_item("crowded", self.deaths_crowding).unwrap();
+        d.set_item("whale_falls", self.whale_falls).unwrap();
         d
     }
     fn weather_name(&self) -> Option<&'static str> {
@@ -1254,6 +1298,46 @@ impl World {
 
     /// Full per-individual state for rendering + species/chronicle logic on
     /// the Python side: one dict per alive individual.
+    /// Everything one animal's brain is computing right now: the labelled
+    /// sense vector going in, the shared perception latent, its own hidden
+    /// layer, and the actions coming out -- plus the anatomy those senses and
+    /// actions belong to. For looking at a specimen rather than guessing what
+    /// it is doing.
+    fn brain_state<'py>(&self, py: Python<'py>, id: u64) -> Option<Bound<'py, PyDict>> {
+        let slot = *self.individuals.id_to_slot.get(&id)?;
+        if !self.individuals.alive[slot] {
+            return None;
+        }
+        let grid = crate::spatial::SpatialGrid::build(
+            self.size as f32,
+            (0..self.individuals.alive.len())
+                .filter(|&s| self.individuals.alive[s])
+                .map(|s| (s as u32, self.individuals.root_pos[s])),
+        );
+        let (sense, _) = crate::physics::sense(self, slot, &grid);
+        let (latent, hidden, act) =
+            self.individuals.decide_traced(slot, &sense, &self.shared_enc_w, &self.shared_enc_b);
+
+        let d = PyDict::new(py);
+        d.set_item("id", id).unwrap();
+        d.set_item("sense", sense.to_vec()).unwrap();
+        d.set_item("sense_labels", individuals::SENSE_LABELS.to_vec()).unwrap();
+        d.set_item("latent", latent).unwrap();
+        d.set_item("hidden", hidden).unwrap();
+        d.set_item("act", act).unwrap();
+        d.set_item("act_labels", individuals::ACT_LABELS.to_vec()).unwrap();
+        let offset = self.individuals.pixel_offset[slot] as usize;
+        let count = self.individuals.pixel_count[slot] as usize;
+        let part_type: Vec<u32> =
+            (0..count).map(|k| self.pixels.part_type[offset + k] as u32).collect();
+        d.set_item("part_type", part_type).unwrap();
+        d.set_item("energy", self.individuals.energy[slot]).unwrap();
+        d.set_item("age", self.individuals.age[slot]).unwrap();
+        d.set_item("heading", self.individuals.heading[slot]).unwrap();
+        d.set_item("velocity", self.individuals.velocity[slot].to_vec()).unwrap();
+        Some(d)
+    }
+
     fn individuals_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
         let list = PyList::empty(py);
         // Debugging aid for a reported "teleports across the map, then
@@ -1501,6 +1585,12 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: overrides plankton production.
+    fn debug_set_snow(&mut self, strength: f32, plumes: u32) {
+        self.snow_strength = strength;
+        self.snow_plumes = plumes;
     }
 
     /// Test-only: overrides density-dependent mortality.

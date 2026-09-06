@@ -58,7 +58,8 @@ impl PartGrid {
         let n = self.n_cells.max(1);
         for dx in -reach..=reach {
             for dy in -reach..=reach {
-                let key = (wrap_cell(cx + dx, n), wrap_cell(cy + dy, n));
+                // x wraps, y does not: the world is a cylinder, not a torus.
+                let key = (wrap_cell(cx + dx, n), cy + dy);
                 if let Some(v) = self.cells.get(&key) {
                     for &(slot, idx) in v {
                         f(slot, idx);
@@ -69,8 +70,9 @@ impl PartGrid {
     }
 }
 
-/// Folds a cell coordinate back into range, so the grid is a torus like the
-/// world it indexes.
+/// Folds a cell coordinate back into range horizontally, so the grid is a
+/// cylinder like the world it indexes: left and right joined, top and bottom
+/// left as real boundaries.
 #[inline]
 fn wrap_cell(c: i32, n: i32) -> i32 {
     let m = c % n;
@@ -111,7 +113,7 @@ impl SpatialGrid {
         let n = self.n_cells.max(1);
         for dx in -reach..=reach {
             for dy in -reach..=reach {
-                let key = (wrap_cell(cx + dx, n), wrap_cell(cy + dy, n));
+                let key = (wrap_cell(cx + dx, n), cy + dy);
                 if let Some(v) = self.cells.get(&key) {
                     out.extend_from_slice(v);
                 }

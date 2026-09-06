@@ -62,6 +62,24 @@
   #species th { position: sticky; top: 0; z-index: 1; color: var(--accent); background: var(--panel-strong); font-weight: 600; }
   .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
   .panel-title { font-size: 12px; color: var(--accent); margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0; }
+  /* Specimen brain inspector. Activations are signed, so every bar reads out
+     from a centre line: which way a channel is pushing matters as much as how
+     hard, and a left-anchored bar hides that. */
+  --pos-def: #6fe3a8; --neg-def: #ff8ba0;
+  #brain { --pos: #6fe3a8; --neg: #ff8ba0; font-size: 11px; max-height: 460px; overflow-y: auto; }
+  .brain-id { color: #7f8ea3; font-size: 11px; letter-spacing: 0; }
+  .bmeta { color: #9fb0c4; margin-bottom: 4px; }
+  .banat { color: #7f8ea3; margin-bottom: 8px; }
+  .bsec { color: var(--accent); margin: 9px 0 4px; font-size: 10px; text-transform: uppercase; }
+  .bdead { color: #ff8ba0; padding: 6px 0; }
+  .brow { display: flex; align-items: center; gap: 6px; margin: 1px 0; }
+  .blabel { width: 108px; flex: none; color: #9fb0c4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btrack { position: relative; flex: 1; height: 9px; background: rgba(255,255,255,0.05); border-radius: 2px; }
+  .btrack::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.18); }
+  .bfill { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+  .bval { width: 34px; flex: none; text-align: right; color: #7f8ea3; }
+  .bstrip { display: flex; gap: 2px; }
+  .bcell { flex: 1; height: 16px; border-radius: 2px; }
   #chronicle { font-size: 12px; line-height: 1.55; max-height: 190px; overflow-y: auto; }
   #chronicle div { color: #cfe; }
   #chronicle div:first-child { color: #fff; font-weight: 600; }
@@ -120,6 +138,10 @@
   <canvas id="overlay" width="1200" height="1200"></canvas>
 </div>
 <div class="side">
+  <div class="panel">
+    <p class="panel-title">Specimen Brain <span id="brain-id" class="brain-id"></span></p>
+    <div id="brain">click an animal to inspect it &mdash; click empty water to drop food</div>
+  </div>
   <div class="panel">
     <p class="panel-title">World Chronicle</p>
     <div id="chronicle">listening...</div>
@@ -485,6 +507,7 @@ document.getElementById('reset-btn').addEventListener('click', async () => {
 // the drop point so the click itself feels like it did something, even
 // before anything swims over to it.
 const foodDropMarkers = []; // {x, y, t} in canvas pixel coords + performance.now()
+let selectedId = null;   // the specimen whose brain is being streamed
 canvas.style.cursor = 'crosshair';
 canvas.addEventListener('click', async (e) => {
   if (!currState) return;
@@ -495,6 +518,30 @@ canvas.addEventListener('click', async (e) => {
   const cell = canvas.width / N;
   const wx = px / cell;
   const wy = N - py / cell; // world Y=0 is the bottom; canvas Y=0 is the top
+
+  // Clicking ON an animal inspects it; clicking open water still drops food.
+  // Nearest component rather than nearest root, so clicking any part of a long
+  // body selects that body -- with a forty-part animal the root is often
+  // nowhere near where you actually clicked.
+  let best = null, bestD2 = 6 * 6;
+  for (const ind of currState.individuals) {
+    for (const p of ind.positions) {
+      let dx = p[0] - wx;
+      // the world is a cylinder: left and right are the same place
+      if (dx > N / 2) dx -= N; else if (dx < -N / 2) dx += N;
+      const dy = p[1] - wy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = ind.id; }
+    }
+  }
+  if (best !== null) {
+    selectedId = best;
+    try {
+      await fetch('/select/' + best, { method: 'POST' });
+    } catch (err) { console.warn('select failed:', err); }
+    return;
+  }
+
   foodDropMarkers.push({ x: px, y: py, t: performance.now() });
   try {
     await fetch('/drop_food', {
@@ -506,6 +553,75 @@ canvas.addEventListener('click', async (e) => {
     console.warn('drop food failed:', err);
   }
 });
+
+// --- Specimen brain inspector ----------------------------------------------
+// Shows what one animal is actually computing, live: the senses going in, the
+// shared perception latent, its own hidden layer, and the actions coming out.
+// The point is to be able to LOOK at a brain rather than infer its behaviour
+// from population statistics, which is the only evidence there has been so far.
+const brainEl = document.getElementById('brain');
+const brainIdEl = document.getElementById('brain-id');
+const PART_LABELS = ['body', 'eye', 'mouth', 'gut', 'tentacle', 'armor', 'flipper', 'filter'];
+
+function bar(v, label) {
+  // Signed bar: activations run -1..1 and the sign is the interesting part,
+  // so it reads from a centre line rather than from the left.
+  const mag = Math.min(1, Math.abs(v));
+  const pct = (mag * 50).toFixed(1);
+  const pos = v >= 0;
+  const colour = pos ? 'var(--pos)' : 'var(--neg)';
+  return `<div class="brow" title="${label}: ${v.toFixed(3)}">
+    <span class="blabel">${label}</span>
+    <span class="btrack">
+      <span class="bfill" style="left:${pos ? 50 : 50 - pct}%;width:${pct}%;background:${colour}"></span>
+    </span>
+    <span class="bval">${v.toFixed(2)}</span>
+  </div>`;
+}
+
+function renderBrain(b) {
+  if (!b) { brainEl.textContent = 'click an animal to inspect it — click empty water to drop food'; brainIdEl.textContent = ''; return; }
+  if (b.dead) {
+    brainIdEl.textContent = '';
+    brainEl.innerHTML = '<div class="bdead">that specimen has died</div>';
+    return;
+  }
+  brainIdEl.textContent = '#' + b.id;
+  const anatomy = {};
+  for (const t of b.part_type) anatomy[t] = (anatomy[t] || 0) + 1;
+  const anatomyStr = Object.keys(anatomy).sort((x, y) => anatomy[y] - anatomy[x])
+    .map(k => `${PART_LABELS[k] || k}×${anatomy[k]}`).join(' · ');
+
+  // Senses are many; showing all forty at once is unreadable, so the strongest
+  // are listed first and the rest stay available underneath.
+  const senses = b.sense.map((v, i) => ({ v, label: b.sense_labels[i] || ('s' + i) }));
+  const strong = senses.slice().sort((p, q) => Math.abs(q.v) - Math.abs(p.v)).slice(0, 10);
+
+  brainEl.innerHTML = `
+    <div class="bmeta">${b.part_type.length} parts &middot; energy ${b.energy.toFixed(0)} &middot; age ${b.age}
+      &middot; speed ${Math.hypot(b.velocity[0], b.velocity[1]).toFixed(2)}</div>
+    <div class="bmeta banat">${anatomyStr}</div>
+    <div class="bsec">strongest senses</div>
+    ${strong.map(s => bar(s.v, s.label)).join('')}
+    <div class="bsec">perception latent (shared encoder, ${b.latent.length}d)</div>
+    <div class="bstrip">${b.latent.map(v => `<span class="bcell" style="background:${v >= 0 ? 'var(--pos)' : 'var(--neg)'};opacity:${Math.min(1, Math.abs(v)) * 0.85 + 0.15}" title="${v.toFixed(3)}"></span>`).join('')}</div>
+    <div class="bsec">hidden layer (this animal's own, ${b.hidden.length}d)</div>
+    <div class="bstrip">${b.hidden.map(v => `<span class="bcell" style="background:${v >= 0 ? 'var(--pos)' : 'var(--neg)'};opacity:${Math.min(1, Math.abs(v)) * 0.85 + 0.15}" title="${v.toFixed(3)}"></span>`).join('')}</div>
+    <div class="bsec">actions</div>
+    ${b.act.map((v, i) => bar(v, b.act_labels[i] || ('a' + i))).join('')}
+  `;
+}
+
+async function pollBrain() {
+  if (selectedId !== null) {
+    try {
+      const r = await fetch('/brain');
+      renderBrain(await r.json());
+    } catch (err) { /* the worker may be mid-restart; try again next tick */ }
+  }
+  setTimeout(pollBrain, 300);
+}
+pollBrain();
 
 document.getElementById('speed-select').addEventListener('change', async (e) => {
   const v = e.target.value;

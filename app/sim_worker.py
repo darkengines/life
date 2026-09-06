@@ -55,6 +55,9 @@ WORLD_SIZE = 240  # was 160 -- a real "bigger, more diverse world": 2.25x the ar
 # new storage capacity provides. Scarcity without a larder is just starvation.
 # Cut again: at 0.009 the population still idled on 723 mean energy with
 # animals standing still, so food was doing no selecting whatever.
+# Marine snow supplies the water now (see Fields::step_marine_snow), and this
+# scales it. Food is a drifting flux entering at the surface rather than
+# something regrowing under an animal's feet, so it must be swum to.
 FOOD_REGROW_RATE = 0.004
 FOOD_PATCHES = 50  # was 25
 POP_CAP = 6000  # was 4000
@@ -93,6 +96,11 @@ FIELD_TMP_PATH = FIELD_STATE_PATH.with_suffix(".tmp")
 RESET_PATH = VAR / "_reset_request"
 SPEED_PATH = VAR / "_speed_control.json"
 FOOD_DROP_PATH = VAR / "_food_drops.json"
+# Brain inspection. The frontend names one specimen; the worker then republishes
+# that animal's live brain state every publish cycle, so what is shown is the
+# brain actually running rather than a one-off snapshot.
+BRAIN_REQUEST_PATH = VAR / "_brain_request.json"
+BRAIN_STATE_PATH = VAR / "_brain_state.json"
 FOOD_DROP_AMOUNT = 6.0  # a generous single clump -- meant to be a real, visible local boost
 # dt=0.1 simulated seconds per tick, so 1x real-time is 10 ticks/sec -- the
 # rate at which simulated time and wall-clock time move together.
@@ -308,6 +316,31 @@ def _check_speed():
         _speed_multiplier = None
 
 
+def _publish_brain(world):
+    """Republish the selected specimen's brain, if one is selected.
+
+    Cheap by construction: it inspects exactly one animal, and only when the
+    frontend has asked for one. If the animal has died the request is left in
+    place and simply produces nothing, so the panel can say so rather than
+    silently showing a stale brain.
+    """
+    try:
+        req = json.loads(BRAIN_REQUEST_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    ident = req.get("id")
+    if ident is None:
+        return
+    try:
+        state = world.brain_state(int(ident))
+    except Exception:
+        state = None
+    payload = state if state is not None else {"id": ident, "dead": True}
+    tmp = BRAIN_STATE_PATH.with_suffix(".tmp")
+    tmp.write_bytes(orjson.dumps(payload))
+    tmp.replace(BRAIN_STATE_PATH)
+
+
 def _apply_food_drops(world):
     """Reads and clears the pending-drops queue every tick (cheap: usually
     empty, a single stat() call). Read-then-immediately-overwrite-empty
@@ -486,6 +519,7 @@ def main():
                 consecutive_errors = 0
                 continue
             last_publish = now
+            _publish_brain(world)
 
             alive = world.individuals_state()
             weather = world.weather_name()

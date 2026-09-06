@@ -34,6 +34,34 @@ pub const MEM_DIM: usize = 4;
 // ones -- but nothing could navigate toward it, so that payoff was
 // unreachable and could never select for anything.
 pub const SENSE_DIM: usize = 36 + MEM_DIM;
+
+/// Names for every sense channel, in order, so an inspector can show what a
+/// number actually means rather than an index. Kept beside SENSE_DIM so the
+/// two cannot drift apart unnoticed.
+pub const SENSE_LABELS: [&str; SENSE_DIM] = [
+    "food gradient x", "food gradient y",
+    "pheromone x", "pheromone y",
+    "blood x", "blood y",
+    "acid x", "acid y",
+    "light x", "light y",
+    "food ahead", "light ahead",
+    "energy", "body size", "kin similarity", "crowd (any kind)",
+    "threat dx", "threat dy", "threat near",
+    "prey dx", "prey dy", "prey near",
+    "mate dx", "mate dy", "mate near",
+    "daylight",
+    "home dx", "home dy", "territory mark", "crowd (own kind)",
+    "shelter here", "shelter dx", "shelter dy",
+    "drift forward", "drift sideways", "speed",
+    "memory 0", "memory 1", "memory 2", "memory 3",
+];
+
+/// Names for every action output, in order.
+pub const ACT_LABELS: [&str; ACT_DIM] = [
+    "move x", "move y", "eat urge", "fight urge", "mate urge",
+    "pheromone emit", "acid emit", "swim effort", "turn",
+    "memory 0", "memory 1", "memory 2", "memory 3",
+];
 pub const HIDDEN_DIM: usize = 12;
 /// Width of the shared perception latent. Every individual's raw senses are
 /// compressed through ONE encoder shared by the whole world, and each
@@ -429,6 +457,41 @@ impl Individuals {
 
     /// Private decision: latent -> action, using this individual's own
     /// evolved weights. Perception is shared; what to DO about it is not.
+    /// The same computation as `decide`, but reporting every intermediate
+    /// stage: the shared perception latent, the individual's own hidden layer,
+    /// and its action outputs. For inspecting one animal's brain live, so what
+    /// it is actually computing can be looked at rather than guessed at.
+    pub fn decide_traced(
+        &self,
+        slot: usize,
+        sense: &[f32; SENSE_DIM],
+        enc_w: &[f32],
+        enc_b: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let z = Self::encode(sense, enc_w, enc_b);
+        let w1 = self.brain_w1(slot);
+        let b1 = self.brain_b1(slot);
+        let w2 = self.brain_w2(slot);
+        let b2 = self.brain_b2(slot);
+        let mut h = vec![0f32; HIDDEN_DIM];
+        for j in 0..HIDDEN_DIM {
+            let mut acc = b1[j];
+            for k in 0..LATENT_DIM {
+                acc += w1[j * LATENT_DIM + k] * z[k];
+            }
+            h[j] = acc.tanh();
+        }
+        let mut out = vec![0f32; ACT_DIM];
+        for j in 0..ACT_DIM {
+            let mut acc = b2[j];
+            for k in 0..HIDDEN_DIM {
+                acc += w2[j * HIDDEN_DIM + k] * h[k];
+            }
+            out[j] = acc.tanh();
+        }
+        (z.to_vec(), h, out)
+    }
+
     pub fn decide(&self, slot: usize, sense: &[f32; SENSE_DIM], enc_w: &[f32], enc_b: &[f32]) -> [f32; ACT_DIM] {
         let z = Self::encode(sense, enc_w, enc_b);
         let w1 = self.brain_w1(slot);

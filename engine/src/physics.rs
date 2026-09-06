@@ -17,11 +17,14 @@ fn normal(rng: &mut rand_pcg::Pcg64, mean: f32, std: f32) -> f32 {
     Normal::new(mean, std).unwrap().sample(rng)
 }
 
-/// The world is a torus: its edges are joined, so the shortest path between
-/// two points may run off one side and back in the other. Every distance and
-/// every direction has to use that shortest path (the minimum image
-/// convention), or the seam becomes a wall that nothing can sense across --
-/// which is precisely the boundary artefact wrapping is meant to remove.
+/// The world is a CYLINDER: left and right are joined, top and bottom are not.
+///
+/// Horizontally there is no edge, so an animal swimming west arrives from the
+/// east and no population accumulates in a corner. Vertically there genuinely
+/// are two different places -- a surface where plankton enters the water and a
+/// floor where what is not eaten settles -- and joining them would destroy the
+/// only axis in the world that means anything: depth. So `wrap_delta` applies
+/// to x alone, and every y difference stays as it is.
 #[inline]
 pub(crate) fn wrap_delta(d: f32, size: f32) -> f32 {
     let half = size * 0.5;
@@ -42,7 +45,7 @@ pub(crate) fn wrap_pos(v: f32, size: f32) -> f32 {
 
 fn dist_wrapped(a: [f32; 2], b: [f32; 2], size: f32) -> f32 {
     let dx = wrap_delta(a[0] - b[0], size);
-    let dy = wrap_delta(a[1] - b[1], size);
+    let dy = a[1] - b[1];
     (dx * dx + dy * dy).sqrt()
 }
 
@@ -339,7 +342,7 @@ pub(crate) fn grid_xy(world: &World, pos: [f32; 2]) -> (u32, u32) {
     // outermost row of the field grids.
     let n = world.size as f32;
     let x = wrap_pos(pos[0], n) as u32;
-    let y = wrap_pos(pos[1], n) as u32;
+    let y = pos[1].clamp(0.0, n - 1.0) as u32;
     (x.min(world.size - 1), y.min(world.size - 1))
 }
 
@@ -532,7 +535,7 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
         if d > range || d < 1e-6 { continue; }
         let other_size = body_size_sum(world, other) * world.individuals.size_scale[other];
         let n = world.size as f32;
-        let delta = [wrap_delta(other_pos[0] - pos[0], n), wrap_delta(other_pos[1] - pos[1], n)];
+        let delta = [wrap_delta(other_pos[0] - pos[0], n), other_pos[1] - pos[1]];
         if other_size > my_size * 1.15 {
             if best_threat.map_or(true, |(bd, _)| d < bd) { best_threat = Some((d, delta)); }
         } else if other_size < my_size * 0.85 {
@@ -572,7 +575,7 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
 /// group pay almost the same, turning a diversity mechanism into a flat
 /// population-wide tax (measured: it cut lineage counts and crashed
 /// population in all 3 A/B seeds).
-fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f32) {
+pub(crate) fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f32) {
     let pos = world.individuals.root_pos[slot];
     // Smell is SHORT range; sight is what finds food far off. The food
     // gradient used to be sampled far away for everyone, gated on nothing, so
@@ -619,7 +622,7 @@ fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f
     let home = world.individuals.home_pos[slot];
     let wn = world.size as f32;
     let home_dx = (wrap_delta(home[0] - pos[0], wn) / crate::HOME_RANGE_NORM).tanh();
-    let home_dy = (wrap_delta(home[1] - pos[1], wn) / crate::HOME_RANGE_NORM).tanh();
+    let home_dy = ((home[1] - pos[1]) / crate::HOME_RANGE_NORM).tanh();
     let territory_local = crate::fields::Fields::sample(&world.fields.territory, world.size, pos).tanh();
 
     let mut out = [0f32; SENSE_DIM];
@@ -751,7 +754,7 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<V
             let mut gripped = false;
             for (tp, tg) in &tentacles {
                 let dx = wrap_delta(their_root[0] - tp[0], wn);
-                let dy = wrap_delta(their_root[1] - tp[1], wn);
+                let dy = their_root[1] - tp[1];
                 let reach = crate::TENTACLE_REACH * tg.max(0.2);
                 if dx * dx + dy * dy < reach * reach { gripped = true; break; }
             }
@@ -761,14 +764,14 @@ fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<V
             let mut best_d2 = f32::MAX;
             for m in &mouths {
                 let d2 = wrap_delta(m[0] - their_root[0], wn).powi(2)
-                    + wrap_delta(m[1] - their_root[1], wn).powi(2);
+                    + (m[1] - their_root[1]).powi(2);
                 if d2 < best_d2 { best_d2 = d2; best = *m; }
             }
             let d = best_d2.sqrt();
             if d < 1e-4 { continue; }
             let pull = crate::TENTACLE_PULL * world.dt;
             let ux = wrap_delta(best[0] - their_root[0], wn) / d;
-            let uy = wrap_delta(best[1] - their_root[1], wn) / d;
+            let uy = (best[1] - their_root[1]) / d;
             world.individuals.velocity[other][0] += ux * pull;
             world.individuals.velocity[other][1] += uy * pull;
             // Newton's third law: hauling prey in tugs the hauler back, in
@@ -857,7 +860,7 @@ fn bite_target(
             // It has to fit in the mouth.
             if bit >= gape { continue; }
             let dx = wrap_delta(p_pos[pk][0] - a_pos[ak][0], wn);
-            let dy = wrap_delta(p_pos[pk][1] - a_pos[ak][1], wn);
+            let dy = p_pos[pk][1] - a_pos[ak][1];
             let d2 = dx * dx + dy * dy;
             let reach = crate::COLLISION_RADIUS * 0.5 * (gape + bit) + crate::BITE_REACH_SLACK;
             if d2 > reach * reach { continue; }
@@ -1674,9 +1677,19 @@ pub fn tick(world: &mut World) {
             // there is no wall to be pinned against, no corner to accumulate
             // in, and no edge population that lives differently from the
             // middle purely because of where it happens to be.
+            // Left and right are joined; top and bottom are not. The
+            // vertical axis is the only one in this world that means
+            // anything -- plankton enters at the surface and sinks, so depth
+            // is a real gradient with a rich end and a poor end. Wrapping it
+            // would make "swim up to feed" meaningless.
             let n = world.size as f32;
             new_pos[0] = wrap_pos(new_pos[0], n);
-            new_pos[1] = wrap_pos(new_pos[1], n);
+            if new_pos[1] <= 0.0 && new_vel[1] < 0.0 {
+                new_vel[1] = 0.0; // the floor: inelastic
+            } else if new_pos[1] >= n - 1.0 && new_vel[1] > 0.0 {
+                new_vel[1] = -new_vel[1] * 0.5; // the surface: reflect
+            }
+            new_pos[1] = new_pos[1].clamp(0.0, n - 1.0);
 
             // The sand seafloor is a real solid surface unless an
             // individual has evolved enough dig_strength to penetrate it --
@@ -2146,6 +2159,34 @@ pub fn tick(world: &mut World) {
     timings.push(("pop_cap", t0.elapsed().as_secs_f64() * 1000.0));
 
     let t0 = std::time::Instant::now();
+    // Whale fall. Every so often something very large dies somewhere above and
+    // its body comes down -- a single enormous, concentrated windfall in a
+    // world whose ordinary food is a thin drifting haze.
+    //
+    // Worth having for the same reason it matters in the real deep sea: it is
+    // a completely different KIND of resource from marine snow. Snow rewards
+    // steady filtering along the drift; a carcass rewards noticing one,
+    // getting to it fast, and holding it against everything else that noticed.
+    // That gives scavenging, competition over a fixed point, and a reason to
+    // travel far and quickly -- none of which a uniform haze can select for.
+    if world.rng.random::<f32>() < crate::WHALE_FALL_CHANCE {
+        let n = world.size as f32;
+        let x = world.rng.random_range(0.0..n);
+        let parts = world.rng.random_range(crate::WHALE_FALL_MIN_PARTS..crate::WHALE_FALL_MAX_PARTS);
+        // A slab of carcass rather than a point, so several animals can feed
+        // on it at once and have to share it.
+        let w = (parts as f32).sqrt().ceil() as i32;
+        let shape: Vec<[f32; 2]> = (0..parts as i32)
+            .map(|i| [(i % w) as f32 * 0.9, (i / w) as f32 * 0.9])
+            .collect();
+        world.corpses.push(crate::Corpse {
+            root_pos: [x, n - 2.0],
+            local_shape: shape,
+            color: [232, 228, 214],
+            energy: world.meal_energy_per_part * parts as f32 * crate::WHALE_FALL_RICHNESS,
+        });
+        world.whale_falls += 1;
+    }
     for c in world.corpses.iter_mut() {
         if c.root_pos[1] > 0.0 { c.root_pos[1] = (c.root_pos[1] - crate::CORPSE_SINK_RATE).max(0.0); }
     }
@@ -2153,9 +2194,27 @@ pub fn tick(world: &mut World) {
     timings.push(("corpses", t0.elapsed().as_secs_f64() * 1000.0));
 
     let t0 = std::time::Instant::now();
-    let cap = world.food_cap;
-    world.fields.step_food_blooms(world.size, &mut world.rng, cap);
-    world.fields.step_food_regrow(world.food_regrow_rate * world.food_regrow_multiplier, world.food_cap);
+    let _cap = world.food_cap;
+    // Marine snow replaces regrowth-in-place. See Fields::step_marine_snow:
+    // food now enters at the surface and sinks, so it must be swum to rather
+    // than sat on.
+    let phase = world.tick_count as f32;
+    let a = (phase / crate::SNOW_BLOOM_PERIOD_A * std::f32::consts::TAU).sin();
+    let b = (phase / crate::SNOW_BLOOM_PERIOD_B * std::f32::consts::TAU).sin();
+    let cycle = (a * 0.6 + b * 0.4) * 0.5 + 0.5; // 0..1
+    // Subtracting a floor and clamping at zero gives real famines rather than
+    // a signal that merely dips.
+    let bloom = ((cycle - crate::SNOW_BLOOM_FLOOR).max(0.0) / (1.0 - crate::SNOW_BLOOM_FLOOR))
+        * world.snow_strength
+        * world.food_regrow_multiplier;
+    world.fields.step_marine_snow(
+        world.size,
+        &mut world.rng,
+        world.food_cap,
+        crate::SNOW_SINK_RATE,
+        bloom,
+        world.snow_plumes,
+    );
     world.fields.step_diffusion(world.size);
     timings.push(("fields", t0.elapsed().as_secs_f64() * 1000.0));
 
@@ -2257,7 +2316,7 @@ fn contact_force(
                 _ => return,
             };
             let dx = wrap_delta(p[0] - op[0], wn);
-            let dy = wrap_delta(p[1] - op[1], wn);
+            let dy = p[1] - op[1];
             let d2 = dx * dx + dy * dy;
             if d2 <= 1e-12 { return; }
             let other_off = world.individuals.pixel_offset[other] as usize;

@@ -224,6 +224,90 @@ impl Fields {
         }
     }
 
+    /// Marine snow: plankton enters at the surface, drifts down, and is gone
+    /// if nothing eats it.
+    ///
+    /// Food used to regrow in place, everywhere, toward a fixed capacity map.
+    /// That made a patch a permanent address: an animal could sit on one and
+    /// be fed forever, which is why so many of them simply stopped moving, and
+    /// it meant location had almost no consequence -- the good places were the
+    /// same good places for the whole run.
+    ///
+    /// Real open water does not work like that. Production happens at the lit
+    /// surface, and what is not eaten sinks continuously into the dark as
+    /// marine snow. That single fact makes depth a gradient with a rich end
+    /// and a poor end, makes food a moving target that has to be swum to, and
+    /// makes a patch something that passes rather than somewhere to sit.
+    ///
+    /// Blooms are intermittent on purpose, including intervals of nothing at
+    /// all. A constant drizzle would just be the old world at a lower rate; it
+    /// is the famine between blooms that makes reserves worth carrying and
+    /// makes finding a bloom worth doing.
+    pub fn step_marine_snow(
+        &mut self,
+        size: u32,
+        rng: &mut Pcg64,
+        cap: f32,
+        sink_rate: f32,
+        bloom_intensity: f32,
+        n_plumes: u32,
+    ) {
+        let n = size as usize;
+
+        // Sink the whole field by `sink_rate` cells, mixing between the two
+        // rows it falls between so slow drift is smooth rather than stepped.
+        let whole = sink_rate.floor() as usize;
+        let frac = sink_rate - whole as f32;
+        if sink_rate > 0.0 {
+            for x in 0..n {
+                let col = x * n;
+                // Bottom-up, so each cell reads rows that have not moved yet.
+                for y in 0..n {
+                    let src = y + whole;
+                    let a = if src < n { self.food[col + src] } else { 0.0 };
+                    let b = if src + 1 < n { self.food[col + src + 1] } else { 0.0 };
+                    self.food[col + y] = a * (1.0 - frac) + b * frac;
+                }
+            }
+        }
+
+        // Whatever reaches the seafloor lingers briefly and then is gone --
+        // this is a flux, not a reservoir, and if it accumulated the bottom
+        // would simply become the old permanent food patch again.
+        for x in 0..n {
+            let col = x * n;
+            for y in 0..crate::SNOW_FLOOR_DEPTH.min(n) {
+                self.food[col + y] *= 1.0 - crate::SNOW_FLOOR_DECAY;
+            }
+        }
+
+        if bloom_intensity <= 0.0 {
+            return;
+        }
+
+        // New plankton enters in patches at the surface, never as an even
+        // sheet: a uniform ceiling of food would give no reason to prefer one
+        // stretch of water over another.
+        let top = n.saturating_sub(crate::SNOW_SOURCE_DEPTH);
+        for _ in 0..n_plumes {
+            let cx = rng.random_range(0..n) as f32;
+            let width = rng.random_range(size as f32 * 0.02..size as f32 * 0.10);
+            let inv_two_r2 = 1.0 / (2.0 * width * width);
+            let strength = bloom_intensity * rng.random_range(0.5..1.5);
+            let span = (width * 2.5).ceil() as i32;
+            for dx in -span..=span {
+                // The world is a cylinder, so a plume near one edge spills
+                // round onto the other rather than being cut off.
+                let x = (((cx as i32 + dx) % n as i32) + n as i32) as usize % n;
+                let w = strength * (-(dx * dx) as f32 * inv_two_r2).exp();
+                if w < 1e-4 { continue; }
+                for y in top..n {
+                    self.food[x * n + y] = (self.food[x * n + y] + w).min(cap);
+                }
+            }
+        }
+    }
+
     fn to_2d(field: &[f32], size: u32) -> Array2<f32> {
         let n = size as usize;
         Array2::from_shape_vec((n, n), field.to_vec()).unwrap()

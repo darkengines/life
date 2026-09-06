@@ -61,35 +61,30 @@ impl Terrain {
 
     pub fn generate(size: u32, rng: &mut Pcg64) -> Self {
         let mut kind = vec![TerrainKind::Empty; (size * size) as usize];
-        // Open water, with no terrain at all.
+        // A sand seafloor, and nothing else. The world is a cylinder: left
+        // and right are joined, top and bottom are not, so there is a real
+        // surface where plankton enters the water and a real bottom where
+        // whatever is not eaten finally settles. Depth is the one axis here
+        // that means something.
         //
-        // The world's edges are now joined -- it is a torus, with no walls and
-        // no corners for a population to accumulate in. A seafloor cannot
-        // coexist with that: "down" wraps round to "up", so a floor is a band
-        // across the middle of a space that has no bottom, and rock rising
-        // from it is structure anchored to nothing. Gravity goes with it for
-        // the same reason.
-        //
-        // What this costs is real and worth stating: the reef was a
-        // size-selective refuge, and it worked -- small bodies were measured
-        // occupying positions with about 80% more surrounding rock than large
-        // ones, and surviving at 42% inside the deep reef against 20% for
-        // large bodies. Removing it removes that refuge, so if small animals
-        // are to keep a place in this world it now has to come from somewhere
-        // else.
+        // Rock is off. What the boulder fields and reef used to provide was a
+        // size-selective refuge, and it genuinely worked -- small bodies were
+        // measured surviving at 42% inside the deep reef against 20% for
+        // large ones. Without it, a small animal's only refuge is behavioural,
+        // so if size structure is wanted it now has to be earned rather than
+        // handed out by the terrain.
+        let floor_height = ((size as f32) * SAND_FLOOR_FRACTION).max(4.0) as u32;
         if crate::TERRAIN_ENABLED {
-            let floor_height = ((size as f32) * SAND_FLOOR_FRACTION).max(4.0) as u32;
             for x in 0..size {
                 for y in 0..floor_height.min(size) {
                     kind[(x * size + y) as usize] = TerrainKind::Sand;
                 }
             }
-        } else {
-            let _ = rng;
-            // Nothing solid anywhere, so nothing encloses anything.
-            return Terrain { size, kind, enclosure: vec![0.0; (size * size) as usize] };
         }
-        let floor_height = ((size as f32) * SAND_FLOOR_FRACTION).max(4.0) as u32;
+        if !crate::ROCK_ENABLED {
+            let _ = rng;
+            return Self::with_enclosure(size, kind);
+        }
         // Rock belongs to the seafloor. Scattering clusters up through the
         // water column left boulders hanging in mid-water with nothing holding
         // them up, which reads as broken rather than as an environment. Real
@@ -198,6 +193,11 @@ impl Terrain {
             }
         }
 
+        Self::with_enclosure(size, kind)
+    }
+
+    /// Builds the enclosure field from a solid mask and returns the terrain.
+    fn with_enclosure(size: u32, kind: Vec<TerrainKind>) -> Self {
         // Box-blur the solid mask into an enclosure field. Prefix sums keep
         // this linear, and it runs once per world.
         let n = size as usize;
