@@ -287,11 +287,23 @@ Status key: **[ ]** not started · **[~]** partially done · **[?]** needs inves
 runs as its own process on the RTX 6000, reads the experience chunks the simulation writes, trains a
 world model self-supervised (predict the next sense vector and the reward from the current latent and
 action), and writes encoder weights atomically; the simulation hot-loads them without ever waiting.
-The encoder predicts the world **3.8× better than "assume nothing changes"**. More importantly it
-changes behaviour: pooled over 4 seeds and ~15k samples per condition, prey-pursuit alignment goes
-from **−0.0102 with a random encoder to +0.0203 with the trained one (diff +0.0305 ±0.0230)** — the
-first statistically defensible evidence that trained perception improves what creatures actually do.
-Fleeing and mate-approach remain within noise.
+The GPU produces **two** things, and the simulation hot-loads both:
+
+1. **Perception** — the shared encoder, which predicts the world ~3× better than "assume nothing
+   changes".
+2. **Instinct** — a baseline policy in exactly an individual decoder's shape, learned by
+   advantage-weighted regression on the population's *own* successful behaviour. Newborns are pulled
+   a quarter of the way toward it at birth and then mutate and evolve from there, so learning reaches
+   the population the way instinct does — through births — while every individual still owns its own
+   decisions. The blend is partial deliberately: at full strength every creature would start
+   identical and the variation selection needs would be gone.
+
+Measured, pooled over 4 seeds and ~17k samples per condition: prey-pursuit alignment goes from
+**−0.0102 under evolution alone to +0.0149 with trained perception and instinct (diff +0.0251
+±0.0216)**, and is positive in **all four seeds** versus negative in three of four without it.
+Mate-approach trends positive (3 of 4 seeds) but stays within noise; fleeing shows nothing. This is
+statistically defensible evidence that the training loop shapes real behaviour — though the effect
+is still small in absolute terms, and only for the behaviour this world actually rewards.
 
 **Original measured starting point** (before the shared encoder and the training loop): evolved
 brains were *no better than random ones* at steering toward food (forage alignment −0.012 evolved vs
