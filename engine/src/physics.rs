@@ -1345,7 +1345,7 @@ pub fn tick(world: &mut World) {
                 world.individuals.energy[slot] -= repro_cost;
                 world.individuals.pending_reward[slot] += crate::REWARD_REPRODUCE;
                 world.individuals.ticks_since_reproduced[slot] = 0;
-                let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot);
+                let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot, world.growth_tip_weight);
                 // Inherited instinct: pull the newborn's decisions part-way
                 // toward what the GPU has learned works, then let evolution
                 // take it from there.

@@ -546,6 +546,12 @@ pub fn recompute_part_counts(individuals: &mut Individuals, pixels: &PixelArena,
 }
 
 pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, slot: usize) -> bool {
+    grow_one_pixel_weighted(individuals, pixels, rng, slot, crate::GROWTH_STRAIGHT_TIP_WEIGHT)
+}
+
+/// As `grow_one_pixel`, with the tip-extension bias supplied explicitly so
+/// it can be swept without a rebuild.
+pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, slot: usize, tip_weight: f32) -> bool {
     let offset = individuals.pixel_offset[slot];
     let count = individuals.pixel_count[slot];
     let grid_pos = rest_grid_positions(pixels, offset, count);
@@ -574,7 +580,7 @@ pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rn
                 od_dir == d
             });
             candidates.push((k, d));
-            weights.push(if extends_tip { crate::GROWTH_STRAIGHT_TIP_WEIGHT } else { 1.0 });
+            weights.push(if extends_tip { tip_weight } else { 1.0 });
         }
     }
     if candidates.is_empty() {
@@ -761,7 +767,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
 /// Full reproduction: copy parent's pixel data (with partial memory
 /// transmission), grow one new pixel, mutate all traits -- matches
 /// pixel_world.py's `mutated_child_at`.
-pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, parent: usize) -> usize {
+pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, parent: usize, tip_weight: f32) -> usize {
     let child = individuals.alloc_slot();
     let parent_offset = individuals.pixel_offset[parent];
     let parent_count = individuals.pixel_count[parent];
@@ -842,7 +848,7 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
 
     recompute_part_counts(individuals, pixels, child);
     recompute_axis_offset(individuals, pixels, child);
-    grow_one_pixel(individuals, pixels, rng, child); // one body-plan variation at birth, matches Python
+    grow_one_pixel_weighted(individuals, pixels, rng, child, tip_weight); // one body-plan variation at birth
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to
     individuals.ticks_since_fed[child] = 0;

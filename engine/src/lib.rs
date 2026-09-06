@@ -92,7 +92,15 @@ pub const PART_DIFFERENTIATION_CHANCE: f32 = 0.30;
 // constant because this is an important morphology pressure, but the current
 // tuned value preserves large-body viability better than lower exploratory
 // settings in the complexity diagnostic.
-pub const GROWTH_STRAIGHT_TIP_WEIGHT: f32 = 8.0;
+// How strongly growth prefers extending an existing tip in its own direction
+// over placing a part anywhere else. Swept against fixed seeds: at 8.0 roughly
+// a quarter of all bodies were pure unbranched chains with 1.1 branch points
+// each -- which is most of why creatures read as worms. At 2.0 pure chains
+// fall to ~12% and branch points rise to ~1.75, with BETTER population than
+// intermediate values, and dropping to 1.0 buys nothing further. Some bias is
+// kept deliberately: real bodies do have a long axis, and removing it entirely
+// would trade one unrealistic shape for another.
+pub const GROWTH_STRAIGHT_TIP_WEIGHT: f32 = 2.0;
 // Bilateral symmetry (see pixels.rs). Present in a minority of founders and
 // able to flip either way when a part grows, so paired body plans are
 // something evolution finds and can also lose, not a property of the world.
@@ -637,6 +645,9 @@ pub struct World {
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
+    /// Runtime-overridable GROWTH_STRAIGHT_TIP_WEIGHT, so the morphology
+    /// pressure that biases bodies toward elongation can be swept.
+    pub growth_tip_weight: f32,
     /// Runtime-overridable GRAVITY, so locomotion can be probed in
     /// isolation without sinking confounding the measurement.
     pub gravity: f32,
@@ -711,6 +722,7 @@ impl World {
             repro_cost_per_part: REPRODUCE_COST_PER_PART,
             graze_mass_ref: GRAZE_MASS_REF,
             thermal_noise: THERMAL_NOISE,
+            growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             gravity: GRAVITY,
             shared_enc_w,
             shared_enc_b,
@@ -1171,6 +1183,9 @@ impl World {
         d.set_item("sense_dim", individuals::SENSE_DIM).unwrap();
         d
     }
+
+    /// Test-only: overrides how strongly growth prefers extending a tip.
+    fn debug_set_growth_tip_weight(&mut self, v: f32) { self.growth_tip_weight = v; }
 
     /// Test-only: overrides gravity.
     fn debug_set_gravity(&mut self, v: f32) { self.gravity = v; }
