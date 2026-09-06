@@ -64,6 +64,11 @@ pub const EAT_RATE: f32 = 2.0;
 // MEANS something), starvation rises from 11% to 16% of deaths, population
 // stays healthy at 200-360, and genuinely large predators persist.
 pub const GRAZE_MASS_REF: f32 = 30.0;
+// A drifting resource mosaic. Blooms open at a new place now and then while
+// standing capacity everywhere slowly fades, so a patch is a temporary thing
+// and a grazer eventually has to go and find the next one.
+pub const FOOD_BLOOM_CHANCE: f32 = 0.06;
+pub const FOOD_CAPACITY_DECAY: f32 = 0.9995;
 pub const MOVE_COST: f32 = 0.01;
 pub const MUTATION_STD: f32 = 0.15;
 pub const COLLISION_RADIUS: f32 = 1.2;

@@ -1491,6 +1491,8 @@ pub fn tick(world: &mut World) {
     timings.push(("corpses", t0.elapsed().as_secs_f64() * 1000.0));
 
     let t0 = std::time::Instant::now();
+    let cap = world.food_cap;
+    world.fields.step_food_blooms(world.size, &mut world.rng, cap);
     world.fields.step_food_regrow(world.food_regrow_rate * world.food_regrow_multiplier, world.food_cap);
     world.fields.step_diffusion(world.size);
     timings.push(("fields", t0.elapsed().as_secs_f64() * 1000.0));

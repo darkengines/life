@@ -175,6 +175,49 @@ impl Fields {
         }
     }
 
+    /// Food blooms drift: new patches open somewhere else while old ones fade.
+    ///
+    /// Measured over 9000 ticks, mean posture curvature never moved (0.49,
+    /// flat) and only ~20% of creatures ever swam straight -- because food
+    /// regrew where it stood, so staying inside a patch beat leaving it and
+    /// WHERE a creature went had no fitness consequence at all. Nothing
+    /// selected for holding a course, so brains never learned to, and vision
+    /// and navigation had nothing to earn. A shifting resource mosaic is what
+    /// makes location matter: a patch you are sitting in will fade, and the
+    /// next one is somewhere you have to travel to.
+    pub fn step_food_blooms(&mut self, size: u32, rng: &mut Pcg64, cap: f32) {
+        // Old ground slowly goes barren, so no patch is permanent.
+        for c in self.food_capacity.iter_mut() {
+            *c *= crate::FOOD_CAPACITY_DECAY;
+        }
+        if rng.random::<f32>() < crate::FOOD_BLOOM_CHANCE {
+            let cx = rng.random_range(0.0..size as f32);
+            let cy = rng.random_range(0.0..size as f32);
+            let radius = rng.random_range(size as f32 * 0.03..size as f32 * 0.08);
+            let inv_two_r2 = 1.0 / (2.0 * radius * radius);
+            let intensity = rng.random_range(0.6..1.0);
+            let n = size as usize;
+            let ir = (radius * 2.5) as i32;
+            let (ix, iy) = (cx as i32, cy as i32);
+            for dx in -ir..=ir {
+                for dy in -ir..=ir {
+                    let px = ix + dx;
+                    let py = iy + dy;
+                    if px < 0 || py < 0 || px >= size as i32 || py >= size as i32 {
+                        continue;
+                    }
+                    let d2 = (dx * dx + dy * dy) as f32;
+                    let w = intensity * (-d2 * inv_two_r2).exp();
+                    if w < 0.01 {
+                        continue;
+                    }
+                    let idx = px as usize * n + py as usize;
+                    self.food_capacity[idx] = (self.food_capacity[idx] + w).min(cap);
+                }
+            }
+        }
+    }
+
     pub fn step_food_regrow(&mut self, regrow_rate: f32, cap: f32) {
         for i in 0..self.food.len() {
             self.food[i] = (self.food[i] + regrow_rate * (self.food_capacity[i] - self.food[i])).clamp(0.0, cap);
