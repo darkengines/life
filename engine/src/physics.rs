@@ -892,11 +892,13 @@ pub(crate) fn storage_capacity(world: &World, slot: usize) -> f32 {
     for k in 0..count {
         let g = crate::pixels::girth(&world.pixels, offset + k);
         let area = g * g / crate::PART_AREA_REF;
-        let mut per = world.pixels.storage[offset + k] * crate::ENERGY_CAP_PER_STORAGE;
-        if world.pixels.part_type[offset + k] == crate::pixels::PART_GUT {
-            per += crate::ENERGY_CAP_PER_GUT;
-        }
-        cap += per * area;
+        // What the tissue is, plus how much of a store this particular part
+        // has evolved to be. The tissue term is what makes a belly a belly;
+        // the evolved term keeps it something selection can still shape.
+        let kind = world.pixels.part_type[offset + k] as usize;
+        let per = crate::pixels::PART_STORAGE[kind]
+            + world.pixels.storage[offset + k] * crate::ENERGY_CAP_PER_STORAGE_TRAIT;
+        cap += per * area * crate::ENERGY_CAP_SCALE;
     }
     cap * world.individuals.size_scale[slot]
 }
@@ -1052,6 +1054,29 @@ pub fn tick(world: &mut World) {
         pos_cache[slot] = Some(pos);
         vel_cache[slot] = Some(vel);
     }
+    // How far each body actually reaches from its own root, and the largest
+    // such reach in the world. Collision used to broad-phase with the spatial
+    // grid's default `nearby`, which searches one cell in each direction --
+    // about three world units around the ROOT. That was adequate when animals
+    // were three-part blobs. Bodies now run to forty parts and span twenty
+    // units or more, so two animals lying completely across one another were
+    // never even tested for contact unless their roots nearly touched. That
+    // is the mechanical reason they were seen stacking on top of each other,
+    // and no amount of crowding cost could fix it, because the overlap was
+    // never detected in the first place.
+    let mut body_radius: Vec<f32> = vec![0.0; n];
+    for slot in alive_slots.iter().copied() {
+        if let Some(pos) = &pos_cache[slot] {
+            let root = world.individuals.root_pos[slot];
+            let mut r = 0.0f32;
+            for p in pos {
+                let d = ((p[0] - root[0]).powi(2) + (p[1] - root[1]).powi(2)).sqrt();
+                if d > r { r = d; }
+            }
+            body_radius[slot] = r;
+        }
+    }
+    let max_body_radius = body_radius.iter().copied().fold(0.0f32, f32::max);
     timings.push(("fk_cache", t0.elapsed().as_secs_f64() * 1000.0));
 
     // Attachment: a stuck attacker drags + gradually eats its target.
@@ -1256,7 +1281,7 @@ pub fn tick(world: &mut World) {
     // death) has real cross-individual mutation and stays sequential --
     // that's the actual reason this couldn't just be one big par_iter.
     let t0 = std::time::Instant::now();
-    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32)> = deciding
+    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32, [f32; 2])> = deciding
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
@@ -1272,7 +1297,7 @@ pub fn tick(world: &mut World) {
             // than rebuilding forward kinematics for it in the sequential
             // phase.
             let (com, moment) = mass_center_and_moment(world, slot, &ind_pos);
-            let contact = contact_force(world, slot, &ind_pos, &grid, &pos_cache);
+            let (contact, separation) = contact_force(world, slot, &ind_pos, &grid, &pos_cache, &body_radius, max_body_radius);
             // Deterministic sampling (no RNG call here -- this closure runs
             // in parallel and must stay a pure function of tick-start
             // state, per the comment above): a modulo on slot+tick spreads
@@ -1299,7 +1324,7 @@ pub fn tick(world: &mut World) {
             };
             // Raw density carried through rather than re-scanning
             // neighbors in the sequential phase where the drain is applied.
-            (d, thrust, contact, sample, conspecific_density, torque, com, moment)
+            (d, thrust, contact, sample, conspecific_density, torque, com, moment, separation)
         })
         .collect();
     timings.push(("decide_parallel", t0.elapsed().as_secs_f64() * 1000.0));
@@ -1323,10 +1348,11 @@ pub fn tick(world: &mut World) {
         // reproductions collapsed onto one row (observed reaching 28), which
         // is not a per-step reward at all and wrecked the training targets.
         world.individuals.pending_reward[slot] = 0.0;
-        let (d, thrust, contact, _, crowding, torque, com, moment) = &pre[i];
+        let (d, thrust, contact, _, crowding, torque, com, moment, separation) = &pre[i];
         let crowding = *crowding;
         let torque = *torque;
         let (com, moment) = (*com, *moment);
+        let separation = *separation;
         // Negative frequency-dependent selection (Red Queen / rare-type
         // advantage): a specialist pathogen tracks whichever host is
         // ABUNDANT, so the commonest lineage pays the highest price and
@@ -1450,9 +1476,27 @@ pub fn tick(world: &mut World) {
             if speed > crate::MAX_SPEED {
                 new_vel = [new_vel[0] * crate::MAX_SPEED / speed, new_vel[1] * crate::MAX_SPEED / speed];
             }
+            // Positional correction for whatever this body is currently
+            // inside of -- another animal, or rock. Applied as a direct
+            // displacement rather than through the force term, because a
+            // force has to fight mass and damping to undo an overlap and a
+            // heavy body simply never wins that fight. Only a FRACTION of the
+            // penetration is undone per tick, and the whole correction is
+            // capped, so bodies ease apart instead of being flung: a solver
+            // that removed the full overlap at once would inject energy and
+            // make dense crowds explode.
+            let mut corr = [
+                separation[0] * crate::CONTACT_CORRECTION * mobility,
+                separation[1] * crate::CONTACT_CORRECTION * mobility,
+            ];
+            let corr_mag = (corr[0] * corr[0] + corr[1] * corr[1]).sqrt();
+            if corr_mag > crate::CONTACT_CORRECTION_MAX {
+                let k = crate::CONTACT_CORRECTION_MAX / corr_mag;
+                corr = [corr[0] * k, corr[1] * k];
+            }
             let mut new_pos = [
-                world.individuals.root_pos[slot][0] + new_vel[0] * world.dt,
-                world.individuals.root_pos[slot][1] + new_vel[1] * world.dt,
+                world.individuals.root_pos[slot][0] + new_vel[0] * world.dt + corr[0],
+                world.individuals.root_pos[slot][1] + new_vel[1] * world.dt + corr[1],
             ];
             // Only the real floor (y=0, the sand seafloor) is an inelastic
             // surface -- resting on solid ground is physically real. The
@@ -1938,17 +1982,43 @@ fn shape_overlaps_rock(world: &World, slot: usize, shape: &[[f32; 2]]) -> bool {
     })
 }
 
-fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &SpatialGrid, pos_cache: &[Option<Vec<[f32; 2]>>]) -> [f32; 2] {
+fn contact_force(
+    world: &World,
+    slot: usize,
+    ind_pos: &[[f32; 2]],
+    grid: &SpatialGrid,
+    pos_cache: &[Option<Vec<[f32; 2]>>],
+    body_radius: &[f32],
+    max_body_radius: f32,
+) -> ([f32; 2], [f32; 2]) {
     let mut push = [0f32; 2];
+    // Contact was a pure force: divided by mass, fought by damping, and
+    // integrated over time. That is fine for a light touch and hopeless for a
+    // real overlap -- a heavy body barely accelerates out of one, so two
+    // animals that end up inside each other simply stay there, which is what
+    // 70% of components sitting within contact range of another animal's
+    // components actually means. Every serious contact solver therefore also
+    // corrects POSITION directly, moving overlapping bodies apart by a
+    // fraction of their penetration each step (Baumgarte stabilisation, and
+    // the same idea position-based dynamics is built on). Accumulated here,
+    // applied to the root once, in the sequential phase.
+    let mut separation = [0f32; 2];
+    let my_mass = body_size_sum(world, slot).max(0.01) * world.individuals.size_scale[slot];
     let my_pos = world.individuals.root_pos[slot];
-    let my_size = ind_pos.len() as f32;
+    let my_radius = body_radius[slot];
     let my_offset = world.individuals.pixel_offset[slot] as usize;
     let my_scale = world.individuals.size_scale[slot];
-    for other in grid.nearby(my_pos) {
+    // Search far enough that anything whose body could possibly reach mine is
+    // considered, rather than a fixed three units around the root.
+    for other in grid.nearby_radius(my_pos, my_radius + max_body_radius + crate::COLLISION_RADIUS) {
         let other = other as usize;
         if other == slot || !world.individuals.alive[other] { continue; }
-        let other_size = world.individuals.pixel_count[other] as f32;
-        if dist(world.individuals.root_pos[other], my_pos) > (my_size + other_size) * 0.5 + 2.0 { continue; }
+        // Exact broad-phase reject on the two bodies' real reach.
+        if dist(world.individuals.root_pos[other], my_pos)
+            > my_radius + body_radius[other] + crate::COLLISION_RADIUS
+        {
+            continue;
+        }
         let other_pos = match &pos_cache[other] {
             Some(p) if p.len() == world.individuals.pixel_count[other] as usize => p,
             _ => continue,
@@ -1956,25 +2026,42 @@ fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &Spatia
         let other_offset = world.individuals.pixel_offset[other] as usize;
         let other_scale = world.individuals.size_scale[other];
         for (pi, &p) in ind_pos.iter().enumerate() {
-            let mut best_d = f32::MAX;
-            let mut best = [0f32; 2];
-            let mut best_oi = 0usize;
+            let my_girth = crate::pixels::girth(&world.pixels, my_offset + pi) * my_scale;
+            // EVERY overlapping pair of components pushes, not just the
+            // single nearest one. Taking the nearest part alone was wrong in
+            // two ways: a body lying across another was resolved as though it
+            // touched at one point, and "nearest" is not "deepest" -- a
+            // slightly further but much fatter part can be penetrating while
+            // the closest one is not, so real overlaps were silently ignored.
+            // This costs nothing extra: the inner scan was already over all
+            // of the other body's parts.
             for (oi, &op) in other_pos.iter().enumerate() {
                 let d = dist(p, op);
-                if d < best_d { best_d = d; best = op; best_oi = oi; }
-            }
-            let reach = crate::COLLISION_RADIUS
-                * 0.5
-                * (crate::pixels::girth(&world.pixels, my_offset + pi) * my_scale
-                    + crate::pixels::girth(&world.pixels, other_offset + best_oi) * other_scale);
-            if best_d > 1e-6 && best_d < reach {
-                let overlap = reach - best_d;
-                push[0] += (p[0] - best[0]) / best_d * overlap * crate::COLLISION_STIFFNESS;
-                push[1] += (p[1] - best[1]) / best_d * overlap * crate::COLLISION_STIFFNESS;
+                if d <= 1e-6 { continue; }
+                let reach = crate::COLLISION_RADIUS
+                    * 0.5
+                    * (my_girth + crate::pixels::girth(&world.pixels, other_offset + oi) * other_scale);
+                if d < reach {
+                    let overlap = reach - d;
+                    let ux = (p[0] - op[0]) / d;
+                    let uy = (p[1] - op[1]) / d;
+                    push[0] += ux * overlap * world.collision_stiffness;
+                    push[1] += uy * overlap * world.collision_stiffness;
+                    // The lighter body yields more, so a small animal is
+                    // shouldered aside by a large one rather than the two
+                    // splitting the correction evenly. Both bodies compute
+                    // their own share independently and the pair separates.
+                    let other_mass = body_size_sum(world, other).max(0.01)
+                        * world.individuals.size_scale[other];
+                    let share = other_mass / (my_mass + other_mass);
+                    separation[0] += ux * overlap * share;
+                    separation[1] += uy * overlap * share;
+                }
             }
         }
     }
 
+    let mut terrain_correction = [0f32; 2];
     // Rock pushes back. Rejecting a MOVE that would enter rock cannot keep
     // bodies out of walls, because a body does not only move -- it undulates.
     // A limb sweeps into stone through the bend wave alone, with the root
@@ -2014,12 +2101,23 @@ fn contact_force(world: &World, slot: usize, ind_pos: &[[f32; 2]], grid: &Spatia
                     if d > 1e-4 {
                         push[0] += vx / d * overlap * crate::TERRAIN_REPULSION_STIFFNESS;
                         push[1] += vy / d * overlap * crate::TERRAIN_REPULSION_STIFFNESS;
+                        terrain_correction[0] += vx / d * overlap;
+                        terrain_correction[1] += vy / d * overlap;
                     }
                 }
             }
         }
     }
-    push
+    // Rock gets a positional correction too, and a firmer one: stone does not
+    // yield, so the whole of the penetration is the body's to undo. Terrain
+    // repulsion alone was already known not to keep bodies out of walls on
+    // its own, for exactly the reason contact force did not keep them out of
+    // each other.
+    if terrain_correction[0] != 0.0 || terrain_correction[1] != 0.0 {
+        separation[0] += terrain_correction[0];
+        separation[1] += terrain_correction[1];
+    }
+    (push, separation)
 }
 
 fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f32; 2]>>], vel_cache: &[Option<Vec<[f32; 2]>>], grid: &SpatialGrid) {

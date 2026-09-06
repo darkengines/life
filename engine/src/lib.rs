@@ -525,6 +525,13 @@ pub const TURN_RATE: f32 = 0.12;
 pub const MAX_SPEED: f32 = 3.0;
 pub const THERMAL_NOISE: f32 = 0.35;
 pub const COLLISION_STIFFNESS: f32 = 1.2;
+/// What fraction of a measured overlap is undone by direct displacement each
+/// tick, and the most any one body may be displaced in a tick. Removing the
+/// whole overlap at once injects energy and makes dense crowds explode;
+/// removing a fraction eases bodies apart, which is how Baumgarte
+/// stabilisation and position-based dynamics both behave.
+pub const CONTACT_CORRECTION: f32 = 0.35;
+pub const CONTACT_CORRECTION_MAX: f32 = 0.6;
 // Rock repulsion. Move-rejection alone cannot keep bodies out of walls,
 // because undulation puts limbs inside stone with no translation at all.
 pub const TERRAIN_REPULSION_RANGE: f32 = 1.4;
@@ -613,8 +620,10 @@ pub const REWARD_ENERGY_STOCK: f32 = 0.004;
 /// observed sitting on 898 units of free, organ-less buffer. Capacity is now
 /// something built out of storage tissue and gut, weighted by part area.
 pub const ENERGY_CAP_BASE: f32 = 12.0;
-pub const ENERGY_CAP_PER_STORAGE: f32 = 14.0;
-pub const ENERGY_CAP_PER_GUT: f32 = 16.0;
+/// Energy banked per unit of tissue-area, on top of what the tissue type
+/// itself stores (see `pixels::PART_STORAGE`).
+pub const ENERGY_CAP_PER_STORAGE_TRAIT: f32 = 0.8;
+pub const ENERGY_CAP_SCALE: f32 = 16.0;
 // How far a newborn's decoder is pulled toward the learned baseline policy.
 // Deliberately partial: at 1.0 every creature would start identical and the
 // variation selection needs would be gone, which would trade evolution away
@@ -751,6 +760,11 @@ pub struct World {
     /// Runtime-overridable METABOLIC_EXPONENT, so the strength of the
     /// large-body energy discount can be swept. 1.0 is the old linear cost.
     pub metabolic_exponent: f32,
+    /// Runtime-overridable COLLISION_STIFFNESS. Detecting an overlap is not
+    /// the same as resolving one: with detection fixed, 70% of components
+    /// were still measured sitting inside another animal's component, so how
+    /// hard contact actually pushes has to be swept rather than guessed.
+    pub collision_stiffness: f32,
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
     /// against fixed seeds rather than guessed at.
     pub thermal_noise: f32,
@@ -853,6 +867,7 @@ impl World {
             sight_range_per_eye: FOOD_SIGHT_RANGE_PER_EYE,
             part_metabolism: PART_METABOLISM,
             metabolic_exponent: METABOLIC_EXPONENT,
+            collision_stiffness: COLLISION_STIFFNESS,
             thermal_noise: THERMAL_NOISE,
             growth_tip_weight: GROWTH_STRAIGHT_TIP_WEIGHT,
             freeze_locomotion: None,
@@ -1420,6 +1435,11 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: overrides how hard overlapping bodies push apart.
+    fn debug_set_collision_stiffness(&mut self, v: f32) {
+        self.collision_stiffness = v;
     }
 
     /// Test-only: overrides the Kleiber metabolic scaling exponent.

@@ -551,6 +551,11 @@ const OUTLINE_SCALE = 1.35, FILL_SCALE = 1.0;
 // through -- an eye-studded hunter and an armoured grazer of the same
 // lineage should look related but obviously differently built. Plain body
 // tissue is left untinted so the organs are what stands out.
+// Engine part-type ids (pixels.rs), named so the render code reads as anatomy
+// rather than as magic numbers.
+const PART_BODY = 0, PART_EYE = 1, PART_MOUTH = 2, PART_GUT = 3,
+      PART_TENTACLE = 4, PART_ARMOR = 5, PART_FLIPPER = 6;
+
 const PART_TINT = [
   null,                        // body: lineage colour, untouched
   [0.96, 0.98, 1.00, 0.80],    // eye: near-white, high blend so it reads as a lens
@@ -570,7 +575,13 @@ function tintFor(partType, r, g, b) {
 
 function drawBodiesGPU(bodies) {
   let count = 0;
-  for (const b of bodies) count += Math.max(1, b.pts.length - 1) + 1; // segments (or 1 if none) + the root's own cap
+  // segments (or 1 if none) + the root's own cap, plus one extra instance per
+  // eye for its pupil -- see the pupil pass below.
+  for (const b of bodies) {
+    count += Math.max(1, b.pts.length - 1) + 1;
+    const t = b.ind.part_type;
+    if (t) for (let i = 0; i < t.length; i++) if (t[i] === PART_EYE) count++;
+  }
   const floatsNeeded = count * GPU_FLOATS_PER_INSTANCE;
   if (!gpuInstanceData || gpuInstanceData.length < floatsNeeded) {
     const newCapacityFloats = Math.max(floatsNeeded, (gpuInstanceData ? gpuInstanceData.length : 0) * 2, 1024);
@@ -611,6 +622,26 @@ function drawBodiesGPU(bodies) {
     // distance-to-segment reduces to a plain circle -- covers the lone-
     // founder case (no segments at all) and reinforces the head's own cap
     // when it does have children.
+    // Pupils. An eye was only a paler capsule among other capsules, so at
+    // any realistic zoom an animal's anatomy was unreadable -- which is half
+    // of what made a crowded world look like an undifferentiated mess. A dark
+    // dot inside the pale lens is the one cue that reads as an EYE at a
+    // glance, at any size, and it costs a single extra instance per eye
+    // (drawn as a degenerate capsule, which the shader's distance-to-segment
+    // reduces to a plain circle).
+    if (types) {
+      for (let i = 0; i < b.pts.length; i++) {
+        if (types[i] !== PART_EYE) continue;
+        const pr = b.rads[i] * 0.42;
+        buf[o+0] = b.pts[i][0]; buf[o+1] = b.pts[i][1];
+        buf[o+2] = b.pts[i][0]; buf[o+3] = b.pts[i][1];
+        buf[o+4] = pr; buf[o+5] = 0;
+        buf[o+6] = 0.05; buf[o+7] = 0.06; buf[o+8] = 0.10; buf[o+9] = fillA;
+        buf[o+10] = 0.05; buf[o+11] = 0.06; buf[o+12] = 0.10; buf[o+13] = 0;
+        o += GPU_FLOATS_PER_INSTANCE;
+      }
+    }
+
     const rootRad = b.rads[0] * FILL_SCALE;
     const rootOutline = b.rads[0] * (OUTLINE_SCALE - FILL_SCALE);
     buf[o+0] = b.pts[0][0]; buf[o+1] = b.pts[0][1];

@@ -319,6 +319,22 @@ well as a sighted one and an eye bought nothing but upkeep. Smell is now short-r
 what reaches; chemoreception in water genuinely is diffuse and local while vision is directional and
 long-ranged, so this is the honest model as well as the useful one.
 
+**Bodies stacked because collision could not see them.** Animals piling on top of one another was
+blamed on behaviour for a long time, and a crowding energy cost was added to punish it. That was
+treating the symptom. Contact broad-phased through the spatial grid's default one-cell search --
+about three world units around the **root** -- which was perfectly adequate when animals were
+three-part blobs. Bodies now reach forty parts and span twenty units or more, so two animals lying
+completely across one another were never even tested for contact unless their roots nearly touched.
+No penalty can discourage an overlap the engine never detects. Two further defects sat behind it:
+the narrow phase tested only the single *nearest* component of the other body, and nearest is not
+deepest -- a slightly further but much fatter part can be penetrating while the closest one is not
+-- and contact was a pure force, which has to fight mass and damping to undo a penetration, a fight
+a heavy body never wins. Fixed by searching each body's real reach, testing every component pair
+(which costs nothing extra, since the inner scan already ran over all of the other body's parts),
+and adding direct positional correction of a fraction of the penetration per tick, mass-weighted so
+the lighter animal yields more. Measured before the fix: **70% of all components were sitting inside
+another animal's component**, at 62-75 ticks/s.
+
 ---
 
 ## 8. Roadmap / wishlist

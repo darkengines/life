@@ -106,6 +106,22 @@ pub const PART_GIRTH: [f32; PART_KIND_COUNT as usize] = [
     1.15, // flipper: broad
 ];
 
+/// How much energy a unit of each tissue can bank. Storage is a property of
+/// the COMPONENT, not a number attached to the whole animal: a belly stores,
+/// muscle stores a little, and a lens or a jaw stores nothing at all. So what
+/// an animal can live off between meals is a consequence of what it is built
+/// from, and a lineage that wants to survive a famine has to actually grow
+/// the tissue to do it.
+pub const PART_STORAGE: [f32; PART_KIND_COUNT as usize] = [
+    0.25, // body: muscle, banks a little
+    0.00, // eye: a lens stores nothing
+    0.00, // mouth
+    1.00, // gut: the belly, this is what a fat reserve is
+    0.05, // tentacle
+    0.10, // armor
+    0.05, // flipper
+];
+
 /// The heritable size of a part, scaled by what kind of organ it is. This is
 /// the number that should drive anything spatial -- drawn radius, collision
 /// footprint, contact distance -- so that what is on screen is what the
