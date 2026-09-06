@@ -16,8 +16,14 @@ pub const MEM_DIM: usize = 4;
 //  threat_dx, threat_dy, threat_proximity, prey_dx, prey_dy, prey_proximity,
 //  mate_dx, mate_dy, mate_proximity, day_light,
 //  home_dx, home_dy, local_territory_mark, conspecific_density,
-//  *root_memory]
-pub const SENSE_DIM: usize = 30 + MEM_DIM;
+//  shelter_here, shelter_dx, shelter_dy, *root_memory]
+//
+// The shelter channels close a real gap: creatures could not perceive terrain
+// at all, discovering rock only by colliding with it. Sheltering measurably
+// pays -- small bodies survive 42% inside the deep reef against 20% for large
+// ones -- but nothing could navigate toward it, so that payoff was
+// unreachable and could never select for anything.
+pub const SENSE_DIM: usize = 33 + MEM_DIM;
 pub const HIDDEN_DIM: usize = 12;
 /// Width of the shared perception latent. Every individual's raw senses are
 /// compressed through ONE encoder shared by the whole world, and each

@@ -519,7 +519,23 @@ fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SENSE_DIM], f
     // species-blind crowding: this one only counts individuals genetically
     // like this one, which is exactly what its specialist pathogens track.
     out[29] = (conspecific_density / crate::CONSPECIFIC_DENSITY_NORM).tanh();
-    out[30..30 + MEM_DIM].copy_from_slice(&mem);
+    // Shelter: how enclosed it is here, and which way cover lies. Gated on
+    // having eyes, like the other spatial senses -- a blind body feels rock
+    // only by running into it.
+    if vision_range_of(world, slot) > 0.0 {
+        let n = world.size as usize;
+        let sample = |px: f32, py: f32| -> f32 {
+            let gx = (px as i32).clamp(0, world.size as i32 - 1) as usize;
+            let gy = (py as i32).clamp(0, world.size as i32 - 1) as usize;
+            world.terrain.enclosure[gx * n + gy]
+        };
+        let r = crate::SHELTER_SENSE_RANGE;
+        let here = sample(pos[0], pos[1]);
+        out[30] = here;
+        out[31] = (sample(pos[0] + r, pos[1]) - sample(pos[0] - r, pos[1])).clamp(-1.0, 1.0);
+        out[32] = (sample(pos[0], pos[1] + r) - sample(pos[0], pos[1] - r)).clamp(-1.0, 1.0);
+    }
+    out[33..33 + MEM_DIM].copy_from_slice(&mem);
     (out, conspecific_density)
 }
 

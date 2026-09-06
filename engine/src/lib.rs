@@ -67,6 +67,8 @@ pub const GRAZE_MASS_REF: f32 = 30.0;
 // A drifting resource mosaic. Blooms open at a new place now and then while
 // standing capacity everywhere slowly fades, so a patch is a temporary thing
 // and a grazer eventually has to go and find the next one.
+// How far out shelter is sampled when working out which way cover lies.
+pub const SHELTER_SENSE_RANGE: f32 = 6.0;
 pub const FOOD_BLOOM_CHANCE: f32 = 0.06;
 pub const FOOD_CAPACITY_DECAY: f32 = 0.9995;
 pub const MOVE_COST: f32 = 0.01;

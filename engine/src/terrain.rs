@@ -37,10 +37,21 @@ const CREVICE_MOUTH_RADIUS: i32 = 1;
 // How far up the water column reef structure can reach, as a fraction of
 // world height. Everything rock-like lives inside this band above the floor.
 const REEF_MAX_RISE: f32 = 0.30;
+/// Radius over which enclosure is measured -- roughly a body length.
+const ENCLOSURE_RADIUS: usize = 4;
 
 pub struct Terrain {
     pub size: u32,
     pub kind: Vec<TerrainKind>, // row-major: kind[x*size+y]
+    /// Fraction of nearby cells that are solid, per cell.
+    ///
+    /// Creatures had no way to perceive terrain at all -- they discovered rock
+    /// only by colliding with it -- so even though sheltering measurably pays
+    /// (small bodies survive 42% inside the deep reef against 20% for large
+    /// ones), nothing could navigate toward it. Precomputed once because
+    /// terrain never changes, which makes sensing shelter a field lookup
+    /// rather than a per-tick scan.
+    pub enclosure: Vec<f32>,
 }
 
 impl Terrain {
@@ -164,7 +175,33 @@ impl Terrain {
             }
         }
 
-        Terrain { size, kind }
+        // Box-blur the solid mask into an enclosure field. Prefix sums keep
+        // this linear, and it runs once per world.
+        let n = size as usize;
+        let r = ENCLOSURE_RADIUS;
+        let mut pref = vec![0u32; (n + 1) * (n + 1)];
+        for x in 0..n {
+            let mut row = 0u32;
+            for y in 0..n {
+                if kind[x * n + y] != TerrainKind::Empty {
+                    row += 1;
+                }
+                pref[(x + 1) * (n + 1) + (y + 1)] = pref[x * (n + 1) + (y + 1)] + row;
+            }
+        }
+        let mut enclosure = vec![0.0f32; n * n];
+        for x in 0..n {
+            let x0 = x.saturating_sub(r);
+            let x1 = (x + r + 1).min(n);
+            for y in 0..n {
+                let y0 = y.saturating_sub(r);
+                let y1 = (y + r + 1).min(n);
+                let total = pref[x1 * (n + 1) + y1] + pref[x0 * (n + 1) + y0]
+                    - pref[x0 * (n + 1) + y1] - pref[x1 * (n + 1) + y0];
+                enclosure[x * n + y] = total as f32 / ((x1 - x0) * (y1 - y0)) as f32;
+            }
+        }
+        Terrain { size, kind, enclosure }
     }
 
     pub fn as_2d(&self) -> Array2<i32> {
