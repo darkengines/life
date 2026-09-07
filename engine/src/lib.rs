@@ -956,6 +956,12 @@ pub const BREEDING_SAFETY_BLOOD_MAX: f32 = 0.35;
 // Credited to an individual the moment it successfully reproduces, for
 // the experience log the future replay training will consume.
 pub const REWARD_REPRODUCE: f32 = 1.0;
+/// Reward for actually moving the way you decided to move, and the identical
+/// penalty for moving against it. Small next to reproducing -- competence is
+/// worth having because of what it lets you do, not for its own sake -- but
+/// present EVERY tick, which reproduction is not, so it is the signal a
+/// controller can actually learn locomotion from.
+pub const REWARD_MOTOR_MATCH: f32 = 0.02;
 /// Keeping a full larder is worth a little every tick. Deliberately far below
 /// the reproduction reward: rewarding energy directly was previously measured
 /// making animals hoard rather than breed (mean energy tripled, births fell
@@ -1131,6 +1137,13 @@ pub struct World {
     /// visible: a crash caused by stripping the water bare looks identical
     /// from the outside to one caused by anything else.
     pub mean_food: f32,
+    /// Mean alignment between what animals decided to do and what actually
+    /// happened to them, over those genuinely trying to move. +1 is going
+    /// exactly where intended, 0 is sideways, -1 is backwards. Published so
+    /// "are they learning to swim" becomes a number that can be watched rather
+    /// than an impression -- every previous claim about it rested on either
+    /// eyeballing the view or a pinned-body probe.
+    pub mean_motor_align: f32,
     pub mean_pressure: f32,
     pub max_pressure: f32,
 
@@ -1300,6 +1313,7 @@ impl World {
             income_predation: 0.0,
             income_scavenge: 0.0,
             mean_food: 0.0,
+            mean_motor_align: 0.0,
             mean_pressure: 0.0,
             max_pressure: 0.0,
             food_regrow_rate,
@@ -1615,6 +1629,7 @@ impl World {
         d.set_item("income_predation", self.income_predation).unwrap();
         d.set_item("income_scavenge", self.income_scavenge).unwrap();
         d.set_item("mean_food", self.mean_food).unwrap();
+        d.set_item("mean_motor_align", self.mean_motor_align).unwrap();
         d.set_item("mean_pressure", self.mean_pressure).unwrap();
         d.set_item("max_pressure", self.max_pressure).unwrap();
         d

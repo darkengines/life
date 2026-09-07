@@ -1579,6 +1579,8 @@ pub fn tick(world: &mut World) {
     let t0 = std::time::Instant::now();
     let mut t_reproduce = 0.0f64;
     let mut t_collision = 0.0f64;
+    let mut align_sum = 0.0f32;
+    let mut align_n = 0.0f32;
     let mut pressure_sum = 0.0f32;
     let mut pressure_n = 0.0f32;
     let mut pressure_max = 0.0f32;
@@ -1724,6 +1726,42 @@ pub fn tick(world: &mut World) {
                 (thrust[0] * mobility * fin + contact[0] + gravity_force[0] + crawl_force[0] * mobility) / mass - crate::LINEAR_DAMPING * vel[0] + noise[0] * mobility / mass.sqrt(),
                 (thrust[1] * mobility * fin + contact[1] + gravity_force[1] * mobility + crawl_force[1] * mobility) / mass - crate::LINEAR_DAMPING * vel[1] + noise[1] * mobility / mass.sqrt(),
             ];
+            // MOTOR COMPETENCE: did the animal go where it meant to go?
+            //
+            // Until now the only rewards were reproducing and holding a full
+            // larder, so nothing whatsoever connected a decision to its
+            // consequence. An animal could command "swim left" every tick of
+            // its life, drift right, and receive exactly the same feedback as
+            // one that swam left perfectly -- which is why creatures visibly
+            // trying to move can fail at it forever without improving. The
+            // information needed to correct it was never in the reward.
+            //
+            // Comparing intent with outcome is the foundation of motor
+            // learning in anything that moves: what a controller needs is not
+            // "was that good for you" but "did that do what you asked". The
+            // signed cosine between intended and actual direction gives both
+            // halves symmetrically -- moving as intended is rewarded, moving
+            // OPPOSITE to intent is punished by the same measure, and drifting
+            // sideways scores near zero.
+            //
+            // Weighted by how hard it was actually trying, so an animal
+            // coasting deliberately is not marked down for not accelerating,
+            // and by speed, so the signal is about real motion rather than
+            // intent in still water.
+            let new_vel_pre = [vel[0] + accel[0] * world.dt, vel[1] + accel[1] * world.dt];
+            {
+                let want = (move_x * move_x + move_y * move_y).sqrt();
+                let got = (new_vel_pre[0] * new_vel_pre[0] + new_vel_pre[1] * new_vel_pre[1]).sqrt();
+                if want > 0.05 && got > 1e-4 {
+                    let align = (move_x * new_vel_pre[0] + move_y * new_vel_pre[1]) / (want * got);
+                    let effort_w = want.min(1.0);
+                    let speed_w = (got / crate::MAX_SPEED).min(1.0);
+                    world.individuals.pending_reward[slot] +=
+                        crate::REWARD_MOTOR_MATCH * align * effort_w * speed_w;
+                    align_sum += align;
+                    align_n += 1.0;
+                }
+            }
             let mut new_vel = [vel[0] + accel[0] * world.dt, vel[1] + accel[1] * world.dt];
             let speed = (new_vel[0] * new_vel[0] + new_vel[1] * new_vel[1]).sqrt();
             if speed > crate::MAX_SPEED {
@@ -2476,6 +2514,7 @@ pub fn tick(world: &mut World) {
     } else {
         world.fields.food.iter().sum::<f32>() / world.fields.food.len() as f32
     };
+    world.mean_motor_align = if align_n > 0.0 { align_sum / align_n } else { 0.0 };
     world.mean_pressure = if pressure_n > 0.0 { pressure_sum / pressure_n } else { 0.0 };
     world.max_pressure = pressure_max;
     timings.push(("decide_apply", t0.elapsed().as_secs_f64() * 1000.0));
