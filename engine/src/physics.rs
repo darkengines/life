@@ -1433,7 +1433,7 @@ pub fn tick(world: &mut World) {
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
-            let mut d: [f32; ACT_DIM] = world.individuals.decide(slot, &s, &world.shared_enc_w, &world.shared_enc_b);
+            let mut d: [f32; ACT_DIM] = world.individuals.decide(&world.pixels, slot, &s, &world.shared_enc_w, &world.shared_enc_b);
             // Scrambling control. Blended deterministically from slot and
             // tick rather than from the RNG, because this closure runs in
             // parallel and has to stay a pure function of tick-start state.

@@ -80,6 +80,7 @@ pub const GRAZE_ORGAN_RATE: f32 = 0.16;
 pub const PLANKTON_CALORIES: f32 = 1.5;
 /// How long a newly-changed body plan is shielded from full selection while
 /// its inherited controller readapts. See Individuals::innovation_protect.
+pub const NEURITE_MUTATION_STD: f32 = 0.06;
 pub const INNOVATION_PROTECT_TICKS: u32 = 260;
 /// How much of the usual pressure a protected animal feels.
 pub const INNOVATION_PROTECT_METABOLISM: f32 = 0.55;
@@ -1368,8 +1369,8 @@ impl World {
                 .map(|s| (s as u32, self.individuals.root_pos[s])),
         );
         let (sense, _) = crate::physics::sense(self, slot, &grid);
-        let (latent, hidden, act) =
-            self.individuals.decide_traced(slot, &sense, &self.shared_enc_w, &self.shared_enc_b);
+        let (latent, hidden, act, body) = self.individuals.decide_traced(
+            &self.pixels, slot, &sense, &self.shared_enc_w, &self.shared_enc_b);
 
         let d = PyDict::new(py);
         d.set_item("id", id).unwrap();
@@ -1377,6 +1378,7 @@ impl World {
         d.set_item("sense_labels", individuals::SENSE_LABELS.to_vec()).unwrap();
         d.set_item("latent", latent).unwrap();
         d.set_item("hidden", hidden).unwrap();
+        d.set_item("body", body).unwrap();
         d.set_item("act", act).unwrap();
         d.set_item("act_labels", individuals::ACT_LABELS.to_vec()).unwrap();
         let offset = self.individuals.pixel_offset[slot] as usize;

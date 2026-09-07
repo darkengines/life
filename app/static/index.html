@@ -605,6 +605,8 @@ function renderBrain(b) {
     ${strong.map(s => bar(s.v, s.label)).join('')}
     <div class="bsec">perception latent (shared encoder, ${b.latent.length}d)</div>
     <div class="bstrip">${b.latent.map(v => `<span class="bcell" style="background:${v >= 0 ? 'var(--pos)' : 'var(--neg)'};opacity:${Math.min(1, Math.abs(v)) * 0.85 + 0.15}" title="${v.toFixed(3)}"></span>`).join('')}</div>
+    <div class="bsec">body network (one unit per component, pooled)</div>
+    <div class="bstrip">${(b.body || []).map(v => `<span class="bcell" style="background:${v >= 0 ? 'var(--pos)' : 'var(--neg)'};opacity:${Math.min(1, Math.abs(v)) * 0.85 + 0.15}" title="${v.toFixed(3)}"></span>`).join('')}</div>
     <div class="bsec">hidden layer (this animal's own, ${b.hidden.length}d)</div>
     <div class="bstrip">${b.hidden.map(v => `<span class="bcell" style="background:${v >= 0 ? 'var(--pos)' : 'var(--neg)'};opacity:${Math.min(1, Math.abs(v)) * 0.85 + 0.15}" title="${v.toFixed(3)}"></span>`).join('')}</div>
     <div class="bsec">actions</div>

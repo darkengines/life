@@ -10,6 +10,40 @@ use rand_pcg::Pcg64;
 use crate::pixels::PixelArena;
 
 pub const MEM_DIM: usize = 4;
+/// Width of the signal each component passes to its children. Small on
+/// purpose: the capacity of this network comes from having MANY units spread
+/// through the body, not from any one of them being wide.
+pub const NEURITE_DIM: usize = 4;
+
+/// A random little transform for a newly grown component.
+///
+/// Scaled so signals neither die out nor saturate as they travel down a long
+/// body -- a chain of thirty parts multiplies thirty of these in sequence, and
+/// getting the scale wrong makes every deep body either silent or pinned at
+/// +/-1. Random rather than zero because the entire point is that a new part
+/// contributes a NEW feature the readout can pick up, which a zero matrix
+/// could never do.
+pub fn random_neurite(rng: &mut Pcg64) -> [f32; NEURITE_DIM * NEURITE_DIM] {
+    let mut w = [0.0f32; NEURITE_DIM * NEURITE_DIM];
+    let scale = 1.0 / (NEURITE_DIM as f32).sqrt();
+    for v in w.iter_mut() {
+        *v = normal(rng, 0.0, scale);
+    }
+    w
+}
+
+/// Inherit a parent component's transform with drift, so a lineage keeps what
+/// its body has learned to compute instead of re-rolling it every birth.
+pub fn inherit_neurite(
+    rng: &mut Pcg64,
+    src: &[f32; NEURITE_DIM * NEURITE_DIM],
+) -> [f32; NEURITE_DIM * NEURITE_DIM] {
+    let mut w = *src;
+    for v in w.iter_mut() {
+        *v = (*v + normal(rng, 0.0, crate::NEURITE_MUTATION_STD)).clamp(-3.0, 3.0);
+    }
+    w
+}
 // [food_gx, food_gy, pheromone_gx, pheromone_gy, blood_gx, blood_gy,
 //  acid_gx, acid_gy, light_gx, light_gy, forward_food, forward_light,
 //  energy_norm, size_norm, kin_similarity_nearest, quorum_local,
@@ -225,6 +259,9 @@ pub struct Individuals {
     pub brain_w1: Vec<f32>,
     pub brain_b1: Vec<f32>,
     pub brain_w2: Vec<f32>,
+    /// Readout from what the BODY computed (see body_signal) into actions.
+    /// Evolved per individual like the rest of the decoder.
+    pub brain_w3: Vec<f32>,
     pub brain_b2: Vec<f32>,
     pub free_slots: Vec<usize>,
     next_id: u64,
@@ -296,6 +333,7 @@ impl Individuals {
             brain_w1: Vec::new(),
             brain_b1: Vec::new(),
             brain_w2: Vec::new(),
+            brain_w3: Vec::new(),
             brain_b2: Vec::new(),
             free_slots: Vec::new(),
             next_id: 0,
@@ -354,6 +392,7 @@ impl Individuals {
             self.brain_w1.extend(std::iter::repeat(0.0).take(HIDDEN_DIM * LATENT_DIM));
             self.brain_b1.extend(std::iter::repeat(0.0).take(HIDDEN_DIM));
             self.brain_w2.extend(std::iter::repeat(0.0).take(ACT_DIM * HIDDEN_DIM));
+            self.brain_w3.extend(std::iter::repeat(0.0).take(ACT_DIM * NEURITE_DIM));
             self.brain_b2.extend(std::iter::repeat(0.0).take(ACT_DIM));
             slot
         }
@@ -393,6 +432,10 @@ impl Individuals {
         let s = slot * ACT_DIM * HIDDEN_DIM;
         &mut self.brain_w2[s..s + ACT_DIM * HIDDEN_DIM]
     }
+    pub fn brain_w3_mut(&mut self, slot: usize) -> &mut [f32] {
+        let s = slot * ACT_DIM * NEURITE_DIM;
+        &mut self.brain_w3[s..s + ACT_DIM * NEURITE_DIM]
+    }
     pub fn brain_b2_mut(&mut self, slot: usize) -> &mut [f32] {
         let s = slot * ACT_DIM;
         &mut self.brain_b2[s..s + ACT_DIM]
@@ -410,6 +453,10 @@ impl Individuals {
         let s = slot * ACT_DIM * HIDDEN_DIM;
         &self.brain_w2[s..s + ACT_DIM * HIDDEN_DIM]
     }
+    pub fn brain_w3(&self, slot: usize) -> &[f32] {
+        let s = slot * ACT_DIM * NEURITE_DIM;
+        &self.brain_w3[s..s + ACT_DIM * NEURITE_DIM]
+    }
     pub fn brain_b2(&self, slot: usize) -> &[f32] {
         let s = slot * ACT_DIM;
         &self.brain_b2[s..s + ACT_DIM]
@@ -419,6 +466,7 @@ impl Individuals {
         for v in self.brain_w1_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.6); }
         for v in self.brain_b1_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.1); }
         for v in self.brain_w2_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.6); }
+        for v in self.brain_w3_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.4); }
         for v in self.brain_b2_mut(slot).iter_mut() { *v = normal(rng, 0.0, 0.1); }
         // A founder's random brain otherwise puts fight_urge's baseline
         // (bias + hidden-layer noise) essentially uniformly across its whole
@@ -447,10 +495,12 @@ impl Individuals {
         let w1: Vec<f32> = self.brain_w1(parent_slot).to_vec();
         let b1: Vec<f32> = self.brain_b1(parent_slot).to_vec();
         let w2: Vec<f32> = self.brain_w2(parent_slot).to_vec();
+        let w3: Vec<f32> = self.brain_w3(parent_slot).to_vec();
         let b2: Vec<f32> = self.brain_b2(parent_slot).to_vec();
         for (dst, src) in self.brain_w1_mut(child_slot).iter_mut().zip(w1.iter()) { *dst = mix(rng, *src, transmission_rate, 0.6); }
         for (dst, src) in self.brain_b1_mut(child_slot).iter_mut().zip(b1.iter()) { *dst = mix(rng, *src, transmission_rate, 0.1); }
         for (dst, src) in self.brain_w2_mut(child_slot).iter_mut().zip(w2.iter()) { *dst = mix(rng, *src, transmission_rate, 0.6); }
+        for (dst, src) in self.brain_w3_mut(child_slot).iter_mut().zip(w3.iter()) { *dst = mix(rng, *src, transmission_rate, 0.4); }
         for (dst, src) in self.brain_b2_mut(child_slot).iter_mut().zip(b2.iter()) { *dst = mix(rng, *src, transmission_rate, 0.1); }
     }
 
@@ -478,11 +528,12 @@ impl Individuals {
     /// it is actually computing can be looked at rather than guessed at.
     pub fn decide_traced(
         &self,
+        pixels: &PixelArena,
         slot: usize,
         sense: &[f32; SENSE_DIM],
         enc_w: &[f32],
         enc_b: &[f32],
-    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let z = Self::encode(sense, enc_w, enc_b);
         let w1 = self.brain_w1(slot);
         let b1 = self.brain_b1(slot);
@@ -496,18 +547,93 @@ impl Individuals {
             }
             h[j] = acc.tanh();
         }
+        let mut h_arr = [0f32; HIDDEN_DIM];
+        h_arr.copy_from_slice(&h);
+        let body = self.body_signal(pixels, slot, &h_arr);
+        let w3 = self.brain_w3(slot);
         let mut out = vec![0f32; ACT_DIM];
         for j in 0..ACT_DIM {
             let mut acc = b2[j];
             for k in 0..HIDDEN_DIM {
                 acc += w2[j * HIDDEN_DIM + k] * h[k];
             }
+            for k in 0..NEURITE_DIM {
+                acc += w3[j * NEURITE_DIM + k] * body[k];
+            }
             out[j] = acc.tanh();
         }
-        (z.to_vec(), h, out)
+        (z.to_vec(), h, out, body.to_vec())
     }
 
-    pub fn decide(&self, slot: usize, sense: &[f32; SENSE_DIM], enc_w: &[f32], enc_b: &[f32]) -> [f32; ACT_DIM] {
+    /// Runs the body's own network: the hidden layer seeds the root, and every
+    /// component transforms what its parent passes down into what it passes to
+    /// its children. Returns the pooled result, which is what the body as a
+    /// whole computed.
+    ///
+    /// Parts are always stored after their parent (a child is appended, and
+    /// re-indexing preserves that), so one forward pass in storage order is a
+    /// correct traversal of the tree -- no recursion and no scratch ordering.
+    pub fn body_signal(
+        &self,
+        pixels: &PixelArena,
+        slot: usize,
+        h: &[f32; HIDDEN_DIM],
+    ) -> [f32; NEURITE_DIM] {
+        let offset = self.pixel_offset[slot] as usize;
+        let count = self.pixel_count[slot] as usize;
+        if count == 0 {
+            return [0.0; NEURITE_DIM];
+        }
+        let mut sig = vec![[0.0f32; NEURITE_DIM]; count];
+        // The root is fed from the individual's own hidden layer: this is
+        // where perception enters the body.
+        for d in 0..NEURITE_DIM {
+            sig[0][d] = h[d % HIDDEN_DIM];
+        }
+        let mut pooled = [0.0f32; NEURITE_DIM];
+        for d in 0..NEURITE_DIM {
+            pooled[d] += sig[0][d];
+        }
+        for k in 1..count {
+            let parent = pixels.parent_idx[offset + k];
+            if parent < 0 { continue; }
+            let p = parent as usize;
+            if p >= k { continue; } // defensive: storage order should prevent this
+            let w = &pixels.neurite[offset + k];
+            let b = &pixels.memory[offset + k];
+            for row in 0..NEURITE_DIM {
+                let mut acc = b[row % MEM_DIM];
+                for col in 0..NEURITE_DIM {
+                    acc += w[row * NEURITE_DIM + col] * sig[p][col];
+                }
+                sig[k][row] = acc.tanh();
+            }
+            for d in 0..NEURITE_DIM {
+                pooled[d] += sig[k][d];
+            }
+        }
+        // Pooled by sum over sqrt(n), not by mean. A plain average of signed
+        // values from many components cancels itself: a thirty-two part animal
+        // was measured pooling to about 0.03, so the body's contribution
+        // vanished exactly as the body got interesting. Dividing by sqrt(n)
+        // keeps the magnitude roughly constant with size -- the standard
+        // variance-preserving scaling -- so a large body speaks as loudly as a
+        // small one and says something more complicated.
+        let inv = 1.0 / (count as f32).sqrt();
+        for d in 0..NEURITE_DIM {
+            pooled[d] = (pooled[d] * inv).tanh();
+        }
+        pooled
+    }
+
+    pub fn decide(
+        &self,
+        pixels: &PixelArena,
+        slot: usize,
+        sense: &[f32; SENSE_DIM],
+        enc_w: &[f32],
+        enc_b: &[f32],
+    ) -> [f32; ACT_DIM] {
         let z = Self::encode(sense, enc_w, enc_b);
         let w1 = self.brain_w1(slot);
         let b1 = self.brain_b1(slot);
@@ -521,11 +647,21 @@ impl Individuals {
             }
             h[j] = acc.tanh();
         }
+        // What the BODY computed, folded into the decision. This is the whole
+        // point of putting a unit in every component: an animal's capacity to
+        // respond grows as it grows, and a part added by mutation contributes
+        // a new signal immediately rather than being dead weight until some
+        // separate controller happens to evolve a use for it.
+        let body = self.body_signal(pixels, slot, &h);
+        let w3 = self.brain_w3(slot);
         let mut out = [0f32; ACT_DIM];
         for j in 0..ACT_DIM {
             let mut acc = b2[j];
             for k in 0..HIDDEN_DIM {
                 acc += w2[j * HIDDEN_DIM + k] * h[k];
+            }
+            for k in 0..NEURITE_DIM {
+                acc += w3[j * NEURITE_DIM + k] * body[k];
             }
             out[j] = acc.tanh();
         }
@@ -665,6 +801,7 @@ pub fn remove_leaf(individuals: &mut Individuals, pixels: &mut PixelArena, slot:
         pixels.rest_angle[dst] = pixels.rest_angle[src];
         pixels.flex[dst] = pixels.flex[src];
         pixels.memory[dst] = pixels.memory[src];
+        pixels.neurite[dst] = pixels.neurite[src];
         pixels.storage[dst] = pixels.storage[src];
         pixels.size[dst] = pixels.size[src];
         pixels.min_angle[dst] = pixels.min_angle[src];
@@ -854,6 +991,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.rest_angle[new_offset as usize + k] = pixels.rest_angle[offset as usize + k];
         pixels.flex[new_offset as usize + k] = pixels.flex[offset as usize + k];
         pixels.memory[new_offset as usize + k] = pixels.memory[offset as usize + k];
+        pixels.neurite[new_offset as usize + k] = pixels.neurite[offset as usize + k];
         pixels.storage[new_offset as usize + k] = pixels.storage[offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[offset as usize + k];
@@ -873,6 +1011,8 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
     pixels.flex[new_offset as usize + count as usize] = clip(parent_flex + normal(rng, 0.0, 0.2), 0.0, 1.0);
     pixels.storage[new_offset as usize + count as usize] = clip(parent_storage + normal(rng, 0.0, 0.15), 0.0, 1.0);
     pixels.memory[new_offset as usize + count as usize] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
+    // A brand new part brings a brand new random feature -- see random_neurite.
+    pixels.neurite[new_offset as usize + count as usize] = random_neurite(rng);
     let new_size = inherit_scalar(rng, parent_size, crate::PART_SIZE_MUTATION_STD, crate::PART_SIZE_MIN, crate::PART_SIZE_MAX);
     let (mut new_min, mut new_max) = (
         inherit_scalar(rng, parent_min_angle, crate::PART_ANGLE_MUTATION_STD, -std::f32::consts::PI, std::f32::consts::PI),
@@ -910,6 +1050,8 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.flex[m] = pixels.flex[t];
         pixels.storage[m] = pixels.storage[t];
         pixels.memory[m] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
+        // A mirrored twin is the same organ, so it computes the same thing.
+        pixels.neurite[m] = pixels.neurite[t];
         pixels.part_type[m] = pixels.part_type[t];
         pixels.size[m] = pixels.size[t];
         // Hinge limits mirror too, so the pair bends symmetrically rather
@@ -941,6 +1083,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     pixels.flex[offset as usize] = rng.random_range(0.3..1.0);
     pixels.storage[offset as usize] = rng.random_range(0.0..0.4);
     pixels.memory[offset as usize] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
+    pixels.neurite[offset as usize] = random_neurite(rng);
     let root_size = rng.random_range(0.6..1.4);
     pixels.size[offset as usize] = root_size;
     pixels.min_angle[offset as usize] = -rng.random_range(0.2..2.2);
@@ -1032,6 +1175,8 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
             mem[d] = if rng.random::<f32>() < mem_rate { parent_mem[d] } else { normal(rng, 0.0, 0.1) };
         }
         pixels.memory[new_offset as usize + k] = mem;
+        pixels.neurite[new_offset as usize + k] =
+            inherit_neurite(rng, &pixels.neurite[parent_offset as usize + k]);
     }
 
     let color = if rng.random::<f32>() < crate::COLOR_MUTATION_RATE {

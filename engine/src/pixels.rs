@@ -15,6 +15,23 @@ pub struct PixelArena {
     pub rest_angle: Vec<f32>,
     pub flex: Vec<f32>,
     pub memory: Vec<[f32; 4]>,
+    /// This component's own little neural unit.
+    ///
+    /// Every part carries a small matrix that transforms the signal arriving
+    /// from its PARENT into the signal it passes to its own children, so
+    /// computation flows outward through the body along the same tree the
+    /// anatomy is built on. Karl Sims did exactly this in 1994 -- brain
+    /// elements embedded within body segments, so control could reuse the
+    /// repetition and recursion of the morphology -- and it is the natural way
+    /// to make a brain that GROWS: capacity is a consequence of having a body,
+    /// not a fixed-size box bolted on beside it.
+    ///
+    /// It also gives new anatomy a free, useful role. A part grown by mutation
+    /// arrives with random weights, which is a random nonlinear projection of
+    /// whatever its parent was carrying -- a new feature the readout can learn
+    /// to use, exactly the principle reservoir computing runs on, and the same
+    /// incremental-complexification idea NEAT applies to network topology.
+    pub neurite: Vec<[f32; crate::individuals::NEURITE_DIM * crate::individuals::NEURITE_DIM]>,
     // Storage affinity: an evolvable per-PIXEL trait, mechanically identical
     // to flex -- not a "belly" concept imposed by design, just a value each
     // pixel can carry that the capture/digestion engine consults (see
@@ -148,7 +165,7 @@ pub fn girth(pixels: &PixelArena, idx: usize) -> f32 {
 impl PixelArena {
     pub fn new() -> Self {
         PixelArena {
-            parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), memory: Vec::new(), storage: Vec::new(),
+            parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
             part_type: Vec::new(),
             symmetric: Vec::new(),
@@ -174,6 +191,10 @@ impl PixelArena {
         self.rest_angle.resize(new_len as usize, 0.0);
         self.flex.resize(new_len as usize, 1.0);
         self.memory.resize(new_len as usize, [0.0; 4]);
+        self.neurite.resize(
+            new_len as usize,
+            [0.0; crate::individuals::NEURITE_DIM * crate::individuals::NEURITE_DIM],
+        );
         self.storage.resize(new_len as usize, 0.0);
         self.size.resize(new_len as usize, 1.0);
         self.min_angle.resize(new_len as usize, -1.0);
