@@ -37,8 +37,26 @@ pub fn effective_toughness(world: &World, target: usize) -> f32 {
 /// fixed trait value regardless of condition -- a starving attacker's bite
 /// is genuinely weaker, not just as dangerous as when it's flush.
 pub fn attacker_power(world: &World, attacker: usize, speed: f32) -> f32 {
-    let energy_factor = (world.individuals.energy[attacker] / crate::ATTACKER_ENERGY_DAMAGE_REF).clamp(0.15, 1.5);
-    speed * world.individuals.bite_force[attacker] * energy_factor
+    // A starving animal is weaker, but not harmless. The floor used to be
+    // 0.15, which meant a hungry predator hit at a seventh of its strength and
+    // so could not fight its way out of starvation at all -- hunger made
+    // hunting impossible exactly when hunting was the only option left. Real
+    // starving predators are dangerous; desperation is not the same as
+    // helplessness. Nothing here tells an animal to attack when hungry -- it
+    // simply removes the engine's guarantee that trying would fail.
+    let energy_factor = (world.individuals.energy[attacker] / crate::ATTACKER_ENERGY_DAMAGE_REF)
+        .clamp(crate::STARVING_ATTACK_FLOOR, 1.5);
+    // A strike carries the MASS behind it, not just the speed of the part
+    // that lands. Momentum is mass times velocity, and leaving mass out meant
+    // a three-part animal moving quickly hit exactly as hard as a forty-part
+    // one moving the same way -- so being big bought nothing in a fight, which
+    // is most of why size never translated into dominance. Scaled by a root so
+    // a heavyweight is a serious opponent without being untouchable.
+    let mass = (crate::physics::body_size_sum(world, attacker)
+        * world.individuals.size_scale[attacker])
+        .max(0.01);
+    let heft = (mass / crate::ATTACK_MASS_REF).sqrt().clamp(0.35, 3.5);
+    speed * world.individuals.bite_force[attacker] * energy_factor * heft
 }
 
 /// Kinetic ("slicing") damage from one landed hit against one target pixel:
@@ -88,6 +106,11 @@ pub fn regenerate(world: &mut World, slot: usize) {
     }
     let mut healed_any = false;
     for k in offset..offset + count {
+        // Dead tissue does not come back. Healing a wound is one thing;
+        // reviving a component that was killed outright would make the
+        // killed-in-place outcome a brief inconvenience rather than a real
+        // injury, and there would be no reason to fear losing a limb.
+        if world.pixels.dead[k] { continue; }
         let max_health = crate::BASE_PIXEL_HEALTH * world.pixels.size[k];
         if world.pixels.health[k] < max_health {
             world.pixels.health[k] = (world.pixels.health[k] + crate::HEALTH_REGEN_RATE).min(max_health);

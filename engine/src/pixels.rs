@@ -14,6 +14,20 @@ pub struct PixelArena {
     pub parent_idx: Vec<i32>, // -1 = root, else LOCAL index within the owning individual's region
     pub rest_angle: Vec<f32>,
     pub flex: Vec<f32>,
+    /// Killed, but still attached.
+    ///
+    /// A lethal hit used to have exactly one outcome: the component and
+    /// everything beyond it was severed and fell away. Real injury is not
+    /// binary like that -- tissue is very often killed in place and carried
+    /// around afterwards, useless and still costing its owner to haul. That is
+    /// a different and worse outcome than losing the limb cleanly, and having
+    /// both makes damage something with texture rather than a single switch.
+    ///
+    /// Dead tissue keeps its mass and its drag, and loses everything else: it
+    /// presents no feeding surface, performs no organ function, and passes no
+    /// signal to the components beyond it -- so anything distal to a dead node
+    /// is cut off from the brain while still being carried.
+    pub dead: Vec<bool>,
     pub memory: Vec<[f32; 4]>,
     /// This component's own little neural unit.
     ///
@@ -165,7 +179,7 @@ pub fn girth(pixels: &PixelArena, idx: usize) -> f32 {
 impl PixelArena {
     pub fn new() -> Self {
         PixelArena {
-            parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
+            parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), dead: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
             part_type: Vec::new(),
             symmetric: Vec::new(),
@@ -190,6 +204,7 @@ impl PixelArena {
         self.parent_idx.resize(new_len as usize, -1);
         self.rest_angle.resize(new_len as usize, 0.0);
         self.flex.resize(new_len as usize, 1.0);
+        self.dead.resize(new_len as usize, false);
         self.memory.resize(new_len as usize, [0.0; 4]);
         self.neurite.resize(
             new_len as usize,

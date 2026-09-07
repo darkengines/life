@@ -1002,7 +1002,8 @@ pub(crate) fn organ_area(world: &World, slot: usize, kind: u8) -> f32 {
     let count = world.individuals.pixel_count[slot] as usize;
     let mut area = 0.0;
     for k in 0..count {
-        if world.pixels.part_type[offset + k] != kind { continue; }
+        // Dead tissue performs no function, whatever it used to be.
+        if world.pixels.part_type[offset + k] != kind || world.pixels.dead[offset + k] { continue; }
         let g = crate::pixels::girth(&world.pixels, offset + k);
         area += g * g / crate::PART_AREA_REF;
     }
@@ -2606,17 +2607,41 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
             world.pixels.health[other_offset + j] -= damage;
             combat::inject_venom(world, slot, hx, hy);
             let pixel_severed = world.pixels.health[other_offset + j] <= 0.0;
+            // A component that has been killed is not necessarily torn off.
+            // A blow that only just kills leaves the tissue dead in place --
+            // still attached, still carried, useless -- while one that lands
+            // with real force in excess of what the part could take severs it
+            // outright. Armour is never cut, only killed: a plate turns a
+            // blade even when the animal behind it has lost.
+            let overkill = damage / crate::BASE_PIXEL_HEALTH.max(0.001);
+            let is_armour =
+                world.pixels.part_type[other_offset + j] == crate::pixels::PART_ARMOR;
+            let tears_off = pixel_severed && !is_armour && overkill >= crate::SEVER_OVERKILL;
             world.fights += 1;
             if damage > 0.0 || pixel_severed {
                 world.individuals.ticks_since_fed[slot] = 0; // a landed, damaging hit counts as successful predation
             }
             world.fields.blood[idx] += crate::BLOOD_EMIT_ON_HIT * (damage / crate::BASE_PIXEL_HEALTH).clamp(0.15, 1.0);
-            if pixel_severed {
+            if tears_off {
                 let died = remove_pixel(world, other, j as u32);
                 if died {
                     kill(world, other);
-            world.deaths_predation += 1;
+                    world.deaths_predation += 1;
                     world.fields.blood[idx] += crate::BLOOD_EMIT_ON_DEATH;
+                }
+            } else if pixel_severed {
+                // Killed but held on. The root is the exception: an animal
+                // whose head dies is dead, not walking around with a dead
+                // head.
+                if j == 0 {
+                    kill(world, other);
+                    world.deaths_predation += 1;
+                    world.fields.blood[idx] += crate::BLOOD_EMIT_ON_DEATH;
+                } else {
+                    world.pixels.dead[other_offset + j] = true;
+                    // Left at zero it would re-trigger this branch every hit;
+                    // dead tissue simply has no health left to lose.
+                    world.pixels.health[other_offset + j] = 0.0;
                 }
             }
             if world.individuals.alive[other] && world.rng.random::<f32>() < world.individuals.stickiness[slot] && world.individuals.attached_to[slot] < 0 {
@@ -2652,7 +2677,19 @@ fn scavenge_all(world: &mut World, deciding: &[usize]) {
             if dist_wrapped(c.root_pos, pos, size) < crate::CORPSE_EAT_RADIUS {
                 let bite = c.energy.min(bite_rate);
                 c.energy -= bite;
-                world.individuals.energy[slot] += bite;
+                // Feeding on a carcass costs work, and the cost depends on
+                // where it is. High in the column the body is still sinking,
+                // so an animal has to swim to stay with it and tear against
+                // nothing -- expensive, and it loses the scraps it frees.
+                // Settled on the bottom the carcass holds still and can be
+                // braced against, so eating is nearly free. That turns a whale
+                // fall into a resource whose value depends on depth: a
+                // fast-moving animal can reach one early and pay for the
+                // privilege, while a patient bottom-dweller waits for it to
+                // arrive and eats it cheaply.
+                let height = (c.root_pos[1] / size).clamp(0.0, 1.0);
+                let effort = crate::CORPSE_FEED_COST_AT_TOP * height * height * bite;
+                world.individuals.energy[slot] += bite - effort;
                 world.individuals.ticks_since_fed[slot] = 0;
                 world.scavenged += 1;
                 // A carcass visibly goes as it is eaten. Its energy was

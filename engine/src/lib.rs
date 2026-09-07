@@ -303,6 +303,18 @@ pub const BASE_PIXEL_HEALTH: f32 = 6.0;
 pub const TOUGHNESS_SIZE_SCALING: f32 = 0.35;
 // A starving attacker bites weakly -- lethality is tied to real, currently-
 // held resources, not just a fixed trait value regardless of condition.
+/// Body mass at which a strike carries its nominal force. Attack energy is
+/// momentum -- mass times speed -- so a heavy animal hits harder than a light
+/// one moving identically.
+pub const ATTACK_MASS_REF: f32 = 14.0;
+/// How hard an animal can still hit on an empty stomach, as a fraction of its
+/// full strength. A starving hunter has to remain capable of hunting.
+pub const STARVING_ATTACK_FLOOR: f32 = 0.55;
+/// A killing blow that only just kills leaves the tissue dead in place; one
+/// that arrives with this much more force than the part could take tears it
+/// off entirely. Armour is never cut, only killed -- a plate turns a blade
+/// even when the animal behind it is beaten.
+pub const SEVER_OVERKILL: f32 = 1.8;
 pub const ATTACKER_ENERGY_DAMAGE_REF: f32 = 15.0;
 // Striking the root ("head") deals bonus damage -- a real, discoverable
 // vital point, not a hardcoded species weakness: any evolved brain that
@@ -562,6 +574,10 @@ pub const CORPSE_EAT_RATE: f32 = 0.5;
 /// fall worth thousands of units took thousands of animal-ticks to clear and
 /// simply sat there looking untouched.
 pub const CORPSE_BITE_PER_MOUTH: f32 = 4.0;
+/// What fraction of a bite is burned fighting a carcass that is still sinking,
+/// at the very top of the column. Falls away quadratically with depth, so a
+/// settled carcass on the bottom is nearly free to eat.
+pub const CORPSE_FEED_COST_AT_TOP: f32 = 0.92;
 pub const CORPSE_SINK_RATE: f32 = 0.05;
 
 pub const DRAG_PARALLEL: f32 = 0.05;
@@ -604,7 +620,10 @@ pub const ROCK_ENABLED: bool = false;
 // how fast the snow falls, and how quickly what reaches the bottom is lost.
 // The floor decay matters: without it the seafloor becomes a reservoir and
 // the world is back to permanent food patches, just lower down.
-pub const SNOW_SOURCE_DEPTH: usize = 6;
+// How deep the photic zone runs, as rows of a 240-row column. Six rows made a
+// single line of water strictly best and pinned the whole population to the
+// ceiling; a real lit zone is a broad band with production tapering through it.
+pub const SNOW_SOURCE_DEPTH: usize = 90;
 pub const SNOW_SINK_RATE: f32 = 0.22;
 pub const SNOW_FLOOR_DEPTH: usize = 14;
 pub const SNOW_FLOOR_DECAY: f32 = 0.06;
@@ -1424,6 +1443,9 @@ impl World {
             // every tentacle on screen relative to where the engine actually
             // put it.
             let part_girth: Vec<f32> = (0..count).map(|k| crate::pixels::girth(&self.pixels, offset + k)).collect();
+            // Dead-but-attached tissue, so an injured animal reads as injured
+            // rather than looking untouched while hauling a useless limb.
+            let part_dead: Vec<bool> = (0..count).map(|k| self.pixels.dead[offset + k]).collect();
             // u32, not u8: PyO3 maps Vec<u8> to Python `bytes`, which orjson
             // refuses to serialize -- every publish then failed and the live
             // page froze at tick 0 while the simulation itself ran on fine.
@@ -1444,6 +1466,7 @@ impl World {
             d.set_item("storage", storage).unwrap();
             d.set_item("part_size", part_size).unwrap();
             d.set_item("part_girth", part_girth).unwrap();
+            d.set_item("part_dead", part_dead).unwrap();
             d.set_item("part_type", part_type).unwrap();
             d.set_item("mirror_sign", mirror_sign).unwrap();
             d.set_item("health_frac", health_frac).unwrap();

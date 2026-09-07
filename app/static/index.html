@@ -1122,6 +1122,8 @@ function render() {
     // how wide a part is drawn without affecting where the joints are. Falls
     // back to part_size so an older engine still renders.
     const partGirth = ind.part_girth || partSize;
+    // Dead-but-attached tissue: killed in a fight, still carried, useless.
+    const partDead = ind.part_dead || null;
     const healthFrac = ind.health_frac || pts.map(() => 1.0);
     const sizeScale = ind.size_scale || 1.0;
     // Volume-preserving cue: a body curled up tighter than its own resting
@@ -1156,7 +1158,16 @@ function render() {
       const wg = Math.round(cg * (1 - wound * 0.6));
       const wb = Math.round(cb * (1 - wound * 0.6));
       rads.push(rad);
-      colors.push([wr, wg, wb]);
+      // Tissue that was killed in a fight but not torn off goes ashen. It is
+      // still there, still being carried, and does nothing -- which should be
+      // visible, because a maimed animal that looks untouched teaches the
+      // watcher nothing about what just happened to it.
+      if (partDead && partDead[i]) {
+        const grey = Math.round((wr + wg + wb) / 3 * 0.42) + 28;
+        colors.push([grey, grey, Math.min(255, grey + 8)]);
+      } else {
+        colors.push([wr, wg, wb]);
+      }
     }
     // The root already renders bigger than a typical part by design (it's
     // "the head"), but an evolved root with a large `size` trait (or a

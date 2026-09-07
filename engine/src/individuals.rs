@@ -599,6 +599,13 @@ impl Individuals {
             if parent < 0 { continue; }
             let p = parent as usize;
             if p >= k { continue; } // defensive: storage order should prevent this
+            // A dead component conducts nothing, so everything beyond it is
+            // cut off from the brain while still being carried around. Losing
+            // the use of a whole limb without losing the limb is exactly the
+            // kind of injury that ought to matter.
+            if pixels.dead[offset + k] {
+                continue;
+            }
             let w = &pixels.neurite[offset + k];
             let b = &pixels.memory[offset + k];
             for row in 0..NEURITE_DIM {
@@ -704,6 +711,8 @@ pub fn exposed_surface(pixels: &PixelArena, offset: u32, count: u32) -> f32 {
     let occupied: std::collections::HashSet<(i32, i32)> = grid.iter().copied().collect();
     let mut total = 0.0;
     for (k, &(x, y)) in grid.iter().enumerate() {
+        // Dead tissue strains nothing: it is carried, not used.
+        if pixels.dead[offset as usize + k] { continue; }
         let open = REST_DIRECTIONS
             .iter()
             .filter(|(dx, dy)| !occupied.contains(&(x + dx, y + dy)))
@@ -802,6 +811,7 @@ pub fn remove_leaf(individuals: &mut Individuals, pixels: &mut PixelArena, slot:
         pixels.flex[dst] = pixels.flex[src];
         pixels.memory[dst] = pixels.memory[src];
         pixels.neurite[dst] = pixels.neurite[src];
+        pixels.dead[dst] = pixels.dead[src];
         pixels.storage[dst] = pixels.storage[src];
         pixels.size[dst] = pixels.size[src];
         pixels.min_angle[dst] = pixels.min_angle[src];
@@ -992,6 +1002,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.flex[new_offset as usize + k] = pixels.flex[offset as usize + k];
         pixels.memory[new_offset as usize + k] = pixels.memory[offset as usize + k];
         pixels.neurite[new_offset as usize + k] = pixels.neurite[offset as usize + k];
+        pixels.dead[new_offset as usize + k] = pixels.dead[offset as usize + k];
         pixels.storage[new_offset as usize + k] = pixels.storage[offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[offset as usize + k];
@@ -1013,6 +1024,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
     pixels.memory[new_offset as usize + count as usize] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
     // A brand new part brings a brand new random feature -- see random_neurite.
     pixels.neurite[new_offset as usize + count as usize] = random_neurite(rng);
+    pixels.dead[new_offset as usize + count as usize] = false;
     let new_size = inherit_scalar(rng, parent_size, crate::PART_SIZE_MUTATION_STD, crate::PART_SIZE_MIN, crate::PART_SIZE_MAX);
     let (mut new_min, mut new_max) = (
         inherit_scalar(rng, parent_min_angle, crate::PART_ANGLE_MUTATION_STD, -std::f32::consts::PI, std::f32::consts::PI),
@@ -1052,6 +1064,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.memory[m] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
         // A mirrored twin is the same organ, so it computes the same thing.
         pixels.neurite[m] = pixels.neurite[t];
+        pixels.dead[m] = false;
         pixels.part_type[m] = pixels.part_type[t];
         pixels.size[m] = pixels.size[t];
         // Hinge limits mirror too, so the pair bends symmetrically rather
@@ -1084,6 +1097,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     pixels.storage[offset as usize] = rng.random_range(0.0..0.4);
     pixels.memory[offset as usize] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
     pixels.neurite[offset as usize] = random_neurite(rng);
+    pixels.dead[offset as usize] = false;
     let root_size = rng.random_range(0.6..1.4);
     pixels.size[offset as usize] = root_size;
     pixels.min_angle[offset as usize] = -rng.random_range(0.2..2.2);
@@ -1177,6 +1191,8 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
         pixels.memory[new_offset as usize + k] = mem;
         pixels.neurite[new_offset as usize + k] =
             inherit_neurite(rng, &pixels.neurite[parent_offset as usize + k]);
+        // Offspring are born whole: scars are not inherited.
+        pixels.dead[new_offset as usize + k] = false;
     }
 
     let color = if rng.random::<f32>() < crate::COLOR_MUTATION_RATE {
