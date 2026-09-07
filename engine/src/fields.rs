@@ -251,6 +251,7 @@ impl Fields {
         sink_rate: f32,
         bloom_intensity: f32,
         n_plumes: u32,
+        production_rows: f32,
     ) {
         let n = size as usize;
 
@@ -317,7 +318,7 @@ impl Fields {
         // quietly become nine times richer.
         let lit_of = |y: usize| 0.25 + 0.75 * ((y - top) as f32 / zone as f32);
         let lit_total: f32 = (top..n).map(lit_of).sum::<f32>().max(1e-6);
-        let spread = crate::SNOW_PRODUCTION_ROWS / lit_total;
+        let spread = production_rows / lit_total;
         for _ in 0..n_plumes {
             let cx = rng.random_range(0..n) as f32;
             let width = rng.random_range(size as f32 * 0.02..size as f32 * 0.10);

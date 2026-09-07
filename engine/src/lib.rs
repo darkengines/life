@@ -72,12 +72,36 @@ pub const EAT_RATE: f32 = 2.0;
 /// apparatus, can strain from the water each tick. Surface rather than mass,
 /// because that is how filtration actually scales; organs rather than flank,
 /// because that is where real animals do their feeding.
-pub const GRAZE_SURFACE_RATE: f32 = 0.055;
-pub const GRAZE_ORGAN_RATE: f32 = 0.16;
+pub const GRAZE_SURFACE_RATE: f32 = 0.057;
+/// Intake scales as feeding capacity to this power. Below the metabolic
+/// exponent of 0.75 on purpose: that ordering -- intake shallower than upkeep
+/// -- is what gives a finite best size and keeps small bodies viable.
+pub const GRAZE_SURFACE_EXPONENT: f32 = 0.70;
+/// Dedicated feeding apparatus is worth several times plain flank, which is
+/// the reason to grow any.
+pub const GRAZE_ORGAN_RATE: f32 = 0.17;
 /// Energy per unit of plankton swallowed. Thin gruel, deliberately: this is
 /// the "less caloric" half of dilute food, and it is what forces an animal to
 /// move a lot of water rather than take a few rich mouthfuls.
-pub const PLANKTON_CALORIES: f32 = 1.5;
+// Thinner again: measured, plankton was supplying 94% of all the energy in the
+// world, so nothing else in the food web mattered. Grazing should be a living
+// that barely covers upkeep, which is what makes the alternatives -- hunting,
+// scavenging a carcass -- worth the risk of pursuing.
+// Thinner again, and this time against a measured target rather than a guess.
+// A typical animal was drawing roughly five times its own upkeep from grazing
+// alone -- a third of the population sat above 400 energy with a peak of 2662,
+// against a reproduction threshold near 20. Grazing is meant to be a living
+// that barely covers costs, because that is what makes hunting and scavenging
+// worth their risk; a surplus that large makes every other way of feeding
+// pointless and every animal fat regardless of how it is built.
+// Bracketed by measurement rather than argued: 0.55 left a third of the
+// population above 400 energy, and 0.22 starved the world down to eight
+// animals with 96% of deaths from starvation. The interesting thing found in
+// between is that both extremes produced the SAME shape -- a handful of
+// enormous winners on thousands of energy while everything else starved --
+// which says the fat animals are not a symptom of too much food but of food
+// being monopolised by whoever is best at gathering it.
+pub const PLANKTON_CALORIES: f32 = 0.36;
 /// How long a newly-changed body plan is shielded from full selection while
 /// its inherited controller readapts. See Individuals::innovation_protect.
 pub const NEURITE_MUTATION_STD: f32 = 0.06;
@@ -228,6 +252,11 @@ pub const SWEEP_MASS_PER_TARGET: f32 = 7.0;
 // is below 1 because swallowing whole wastes more than careful feeding does.
 pub const ENGULF_SIZE_RATIO: f32 = 4.0;
 pub const ENGULF_EFFICIENCY: f32 = 0.75;
+/// How much of a victim's banked energy a predator recovers. Energy moves UP
+/// the chain rather than being invented at each link: a predator eats what its
+/// prey spent its life accumulating, so a fat animal is a better meal than a
+/// thin one and hunting can actually be a living.
+pub const PREDATION_RESERVE_SHARE: f32 = 0.6;
 pub const ENGULF_GAPE_MIN: f32 = 2.5;
 // Prey struggling out of a grip. Per-tick escape odds are this base scaled
 // by the victim's size advantage, so something that grabbed prey larger
@@ -788,7 +817,10 @@ pub const ENERGY_CAP_BASE: f32 = 12.0;
 /// Energy banked per unit of tissue-area, on top of what the tissue type
 /// itself stores (see `pixels::PART_STORAGE`).
 pub const ENERGY_CAP_PER_STORAGE_TRAIT: f32 = 0.8;
-pub const ENERGY_CAP_SCALE: f32 = 16.0;
+// Lowered: an animal was observed banking 2662 energy against a reproduction
+// threshold near 20, which is not a reserve, it is immunity. A larder should
+// carry a body through a famine, not through anything the world can do to it.
+pub const ENERGY_CAP_SCALE: f32 = 7.0;
 // How far a newborn's decoder is pulled toward the learned baseline policy.
 // Deliberately partial: at 1.0 every creature would start identical and the
 // variation selection needs would be gone, which would trade evolution away
@@ -907,6 +939,15 @@ pub struct World {
     pub deaths_crowding: u64,
     pub whale_falls: u64,
     pub leviathans: u64,
+    /// Where the world's energy actually comes from, accumulated per source.
+    /// Published because "plankton is too nutritive" is a claim about the
+    /// SHARE of the economy it represents, and that share has never been
+    /// visible -- every previous calorie change was a guess against an unknown
+    /// baseline. Tuning a number nobody can see is how the density regulator
+    /// ended up disabled for hours.
+    pub income_plankton: f64,
+    pub income_predation: f64,
+    pub income_scavenge: f64,
     /// Mean and peak space pressure over the living population last tick.
     /// Published so the density regulator is OBSERVABLE: it was contributing
     /// 0% of deaths while the world looked crowded, and there is no way to
@@ -966,6 +1007,12 @@ pub struct World {
     pub space_pressure_mortality: f32,
     /// Runtime-overridable marine snow, so how much plankton the ocean
     /// actually produces can be calibrated rather than guessed.
+    /// Runtime-overridable food economy, so calories and total production can
+    /// be swept TOGETHER rather than hand-tuned one at a time against a moving
+    /// target -- which is how the last several settings were chosen, and none
+    /// of them worked.
+    pub plankton_calories: f32,
+    pub production_rows: f32,
     pub snow_strength: f32,
     pub snow_plumes: u32,
     /// Runtime-overridable THERMAL_NOISE, so the noise floor can be swept
@@ -1062,6 +1109,9 @@ impl World {
             deaths_crowding: 0,
             whale_falls: 0,
             leviathans: 0,
+            income_plankton: 0.0,
+            income_predation: 0.0,
+            income_scavenge: 0.0,
             mean_pressure: 0.0,
             max_pressure: 0.0,
             food_regrow_rate,
@@ -1080,6 +1130,8 @@ impl World {
             brain_noise: 0.0,
             space_pressure_tolerance: SPACE_PRESSURE_TOLERANCE,
             space_pressure_mortality: SPACE_PRESSURE_MORTALITY,
+            plankton_calories: PLANKTON_CALORIES,
+            production_rows: SNOW_PRODUCTION_ROWS,
             snow_strength: SNOW_BLOOM_STRENGTH,
             snow_plumes: SNOW_PLUMES_PER_TICK,
             thermal_noise: THERMAL_NOISE,
@@ -1353,6 +1405,9 @@ impl World {
         d.set_item("crowded", self.deaths_crowding).unwrap();
         d.set_item("whale_falls", self.whale_falls).unwrap();
         d.set_item("leviathans", self.leviathans).unwrap();
+        d.set_item("income_plankton", self.income_plankton).unwrap();
+        d.set_item("income_predation", self.income_predation).unwrap();
+        d.set_item("income_scavenge", self.income_scavenge).unwrap();
         d.set_item("mean_pressure", self.mean_pressure).unwrap();
         d.set_item("max_pressure", self.max_pressure).unwrap();
         d
@@ -1708,6 +1763,12 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: sets calories per unit of plankton and total production.
+    fn debug_set_plankton(&mut self, calories: f32, production_rows: f32) {
+        self.plankton_calories = calories;
+        self.production_rows = production_rows;
     }
 
     /// Test-only: overrides plankton production.

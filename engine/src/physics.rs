@@ -1369,7 +1369,17 @@ pub fn tick(world: &mut World) {
                     let (hx, hy) = grid_xy(world, world.individuals.root_pos[target]);
                     let idx = (hx * world.size + hy) as usize;
                     let died = remove_pixel(world, target, victim);
-                    world.individuals.energy[slot] += world.meal_energy_per_part * digestion_multiplier(world, slot);
+                    // Same principle for chewing: a bite takes a share of
+                    // what the victim was carrying, not a fixed ration.
+                    let victim_parts = world.individuals.pixel_count[target].max(1) as f32;
+                    let reserve_bite = world.individuals.energy[target].max(0.0)
+                        * crate::PREDATION_RESERVE_SHARE
+                        / victim_parts;
+                    world.individuals.energy[target] -= reserve_bite;
+                    let bite_gain = (world.meal_energy_per_part + reserve_bite)
+                        * digestion_multiplier(world, slot);
+                    world.individuals.energy[slot] += bite_gain;
+                    world.income_predation += bite_gain as f64;
                     world.fields.blood[idx] += crate::BLOOD_EMIT_ON_HIT;
                     if died {
                         kill(world, target);
@@ -1850,9 +1860,27 @@ pub fn tick(world: &mut World) {
             // plankton has to grow the apparatus for it.
             let feeding_organs = organ_area(world, slot, crate::pixels::PART_FILTER)
                 + organ_area(world, slot, crate::pixels::PART_MOUTH) * 0.4;
-            let intake_capacity = (surface * crate::GRAZE_SURFACE_RATE
-                + feeding_organs * crate::GRAZE_ORGAN_RATE)
-                .max(0.0);
+            // Sublinear in surface, which is the part that was still wrong.
+            //
+            // Charging intake on exposed surface was supposed to stop bigger
+            // always being better, and for a compact body it does -- perimeter
+            // grows as sqrt(N). But an ELONGATED body's perimeter grows as N,
+            // and elongation is exactly what this pressure selected for, so
+            // intake went straight back to scaling as N against upkeep at
+            // N^0.75 and large animals won unboundedly again. Measured, a
+            // four-part founder ran at 0.98 of its own upkeep -- a net loss
+            // with food everywhere -- while a forty-part animal ran at 1.74,
+            // so founders could not establish and the world crashed from 98 to
+            // 4 within a few hundred ticks at every food level tried.
+            //
+            // Real filtration scales as W^0.66-0.70, SHALLOWER than
+            // metabolism's W^0.75. Putting that exponent on the surface term
+            // restores the ordering for every body shape rather than only for
+            // compact ones, and it makes small animals viable again -- which
+            // is a precondition for any size structure at all.
+            let raw = surface * crate::GRAZE_SURFACE_RATE
+                + feeding_organs * crate::GRAZE_ORGAN_RATE;
+            let intake_capacity = raw.max(0.0).powf(crate::GRAZE_SURFACE_EXPONENT);
             let n_cells = world.individuals.pixel_count[slot].max(1) as f32;
             let per_part = intake_capacity / n_cells;
             let owned_g;
@@ -1880,8 +1908,10 @@ pub fn tick(world: &mut World) {
                 world.fields.food[c] -= take;
                 eaten += take;
             }
-            world.individuals.energy[slot] +=
-                eaten * crate::PLANKTON_CALORIES * graze_efficiency * digestion_multiplier(world, slot);
+            let gain = eaten * world.plankton_calories * graze_efficiency
+                * digestion_multiplier(world, slot);
+            world.individuals.energy[slot] += gain;
+            world.income_plankton += gain as f64;
             world.individuals.ticks_since_fed[slot] += 1;
             if eaten > 0.001 {
                 world.individuals.ticks_since_fed[slot] = 0;
@@ -2343,6 +2373,7 @@ pub fn tick(world: &mut World) {
         crate::SNOW_SINK_RATE,
         bloom,
         world.snow_plumes,
+        world.production_rows,
     );
     world.fields.step_diffusion(world.size);
     timings.push(("fields", t0.elapsed().as_secs_f64() * 1000.0));
@@ -2636,11 +2667,26 @@ fn resolve_collision(world: &mut World, slot: usize, pos_cache: &[Option<Vec<[f3
             if my_mass >= prey_mass * gape {
                 let (ex, ey) = grid_xy(world, world.individuals.root_pos[other]);
                 let eidx = (ex * world.size + ey) as usize;
-                let meal = world.individuals.pixel_count[other] as f32
+                // Eating an animal yields what that animal actually CONTAINS:
+                // its tissue, plus a share of the reserves it had banked.
+                //
+                // A flat rate per part meant a fat, well-fed animal was worth
+                // exactly the same as a starving one, and it conjured energy
+                // out of nothing rather than moving it up the chain. Measured,
+                // predation supplied 1% of the world's energy while causing
+                // 44% of its deaths -- killing was common and nearly
+                // worthless, so nothing could ever make a living as a
+                // predator. Paying out of the prey's own reserves is what
+                // makes hunting a fat animal worth more than hunting a thin
+                // one, and it is how a food chain actually carries energy:
+                // a predator eats what its prey spent its life accumulating.
+                let meal = (world.individuals.pixel_count[other] as f32
                     * world.meal_energy_per_part
+                    + world.individuals.energy[other].max(0.0) * crate::PREDATION_RESERVE_SHARE)
                     * crate::ENGULF_EFFICIENCY
                     * digestion_multiplier(world, slot);
                 world.individuals.energy[slot] += meal;
+                world.income_predation += meal as f64;
                 world.individuals.ticks_since_fed[slot] = 0;
                 world.fields.blood[eidx] += crate::BLOOD_EMIT_ON_DEATH;
                 world.fights += 1;
@@ -2741,6 +2787,7 @@ fn scavenge_all(world: &mut World, deciding: &[usize]) {
                 let height = (c.root_pos[1] / size).clamp(0.0, 1.0);
                 let effort = crate::CORPSE_FEED_COST_AT_TOP * height * height * bite;
                 world.individuals.energy[slot] += bite - effort;
+                world.income_scavenge += (bite - effort) as f64;
                 world.individuals.ticks_since_fed[slot] = 0;
                 world.scavenged += 1;
                 // A carcass visibly goes as it is eaten. Its energy was
