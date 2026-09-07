@@ -1425,6 +1425,29 @@ pub fn tick(world: &mut World) {
         *lineage_counts.entry(world.individuals.color[slot]).or_insert(0) += 1;
     }
     let total_alive = alive_slots.len().max(1) as f32;
+    // Frequency dependence has to be measured against what "common" actually
+    // means in THIS world, not against a fixed number.
+    //
+    // The threshold was an absolute 8% share, which is only meaningful when
+    // there are many lineages. Measured, the world had two or three effective
+    // lineages -- so every animal alive was far over the threshold, every
+    // lineage sat at maximum pressure, and what was supposed to be a penalty
+    // on being COMMON became a flat tax on being alive. It consumed 45% of all
+    // the energy in the world, nearly as much as basal metabolism.
+    //
+    // Worse, it was a runaway: as lineages died the survivors' shares rose,
+    // which raised the pressure, which killed more lineages. A mechanism meant
+    // to PRESERVE diversity was actively driving the world to a monoculture and
+    // then to extinction.
+    //
+    // Scoring against the mean share (one over the number of lineages) makes
+    // it relative, as it always should have been: a lineage at its fair share
+    // pays nothing however few lineages there are, and only genuine
+    // over-representation is penalised.
+    let n_lineages = lineage_counts.len().max(1) as f32;
+    let fair_share = 1.0 / n_lineages;
+    let share_threshold =
+        (fair_share * crate::PATHOGEN_FAIR_SHARE_MULT).max(crate::PATHOGEN_SHARE_THRESHOLD);
     let lineage_share: Vec<f32> = deciding
         .iter()
         .map(|&slot| {
@@ -1546,7 +1569,7 @@ pub fn tick(world: &mut World) {
         // Below THRESHOLD share there is no pressure at all; above it,
         // damage grows with the SQUARE of the excess share.
         let share = lineage_share[i];
-        let excess = (share - crate::PATHOGEN_SHARE_THRESHOLD).max(0.0);
+        let excess = (share - share_threshold).max(0.0);
         let pathogen_pressure =
             ((excess / crate::PATHOGEN_SHARE_SCALE).powi(2)).min(crate::PATHOGEN_PRESSURE_MAX);
         let (move_x, move_y, reproduce_urge, fight_urge, crawl_intent, acid_intent, light_intent) =
@@ -1783,7 +1806,9 @@ pub fn tick(world: &mut World) {
             // so sprinting is a real decision with a real price rather than a
             // free setting every creature would simply max out.
             let effort_cost = world.individuals.swim_gain[slot] * world.individuals.swim_gain[slot];
-            world.individuals.energy[slot] -= crate::MOVE_COST * speed_final * effort_cost;
+            let move_spend = crate::MOVE_COST * speed_final * effort_cost;
+            world.individuals.energy[slot] -= move_spend;
+            world.spend_movement += move_spend as f64;
         }
 
         if world.individuals.alive[slot] && !is_captured {
@@ -2021,8 +2046,9 @@ pub fn tick(world: &mut World) {
             } else {
                 1.0
             };
-            world.individuals.energy[slot] -=
-                metabolism * world.metabolism_multiplier * selection_relief;
+            let metab_spend = metabolism * world.metabolism_multiplier * selection_relief;
+            world.individuals.energy[slot] -= metab_spend;
+            world.spend_metabolism += metab_spend as f64;
 
             // Energy is now BOUNDED by what the body can actually hold.
             // Before this an animal simply accumulated without limit -- one
@@ -2095,8 +2121,10 @@ pub fn tick(world: &mut World) {
             let over = (pressure - world.space_pressure_tolerance).max(0.0);
             if over > 0.0 {
                 let mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
-                world.individuals.energy[slot] -=
+                let crowd_spend =
                     crate::SPACE_PRESSURE_ENERGY_COST * over * over * (1.0 + mass * crate::CROWDING_SIZE_FACTOR);
+                world.individuals.energy[slot] -= crowd_spend;
+                world.spend_crowding += crowd_spend as f64;
                 let risk = (world.space_pressure_mortality * over * over * selection_relief)
                     .min(crate::SPACE_PRESSURE_MORTALITY_MAX);
                 if risk > 0.0 && world.rng.random::<f32>() < risk {
@@ -2154,6 +2182,7 @@ pub fn tick(world: &mut World) {
                 let toll = world.pathogen_damage_rate * pathogen_pressure * resistance * upkeep;
                 let before = world.individuals.energy[slot];
                 world.individuals.energy[slot] -= toll;
+                world.spend_disease += toll as f64;
                 // Attribute the death to the thing that actually caused it.
                 if before > 0.0 && world.individuals.energy[slot] <= 0.0 {
                     world.deaths_disease += 1;
@@ -2276,6 +2305,7 @@ pub fn tick(world: &mut World) {
                 && has_mate
             {
                 world.individuals.energy[slot] -= repro_cost;
+                world.spend_reproduction += repro_cost as f64;
                 world.individuals.pending_reward[slot] += crate::REWARD_REPRODUCE;
                 world.individuals.ticks_since_reproduced[slot] = 0;
                 let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot, world.growth_tip_weight);

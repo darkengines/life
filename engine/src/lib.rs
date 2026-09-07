@@ -118,7 +118,13 @@ pub const GRAZE_SURFACE_EXPONENT: f32 = 0.70;
 /// Plankton concentration at which straining runs at half rate. Below it,
 /// intake falls away faster than the food does, so the last of a patch is
 /// never harvested -- the refuge that lets depleted water recover.
-pub const GRAZE_HALF_SATURATION: f32 = 0.05;
+// Set against the water's ACTUAL concentration this time. At 0.05, with
+// typical plankton well below that, this was not protecting depleted patches
+// -- it was cutting intake by most of its value everywhere, which is why
+// founders starved before they could establish. The third instance tonight of
+// the same mistake: a threshold chosen without looking at the distribution it
+// thresholds.
+pub const GRAZE_HALF_SATURATION: f32 = 0.008;
 /// Dedicated feeding apparatus is worth several times plain flank, which is
 /// the reason to grow any.
 pub const GRAZE_ORGAN_RATE: f32 = 0.17;
@@ -173,7 +179,21 @@ pub const INNOVATION_PROTECT_METABOLISM: f32 = 0.55;
 // falls from ~96 to ~45 (reproduction threshold is ~20, so energy finally
 // MEANS something), starvation rises from 11% to 16% of deaths, population
 // stays healthy at 200-360, and genuinely large predators persist.
-pub const GRAZE_MASS_REF: f32 = 30.0;
+// Raised sharply after doing the arithmetic: at 30, a thirty-seven part animal
+// in ABUNDANT water ran at -0.186 energy per tick. Its gross intake was fine;
+// this penalty cut it to 0.37 of that, and since predation was supplying
+// essentially none of the world's energy there was no alternative living to
+// switch to. Animals grew, became unfeedable, and starved -- with the water
+// full of food. That is the whole reason the population kept crashing from
+// three hundred to single figures.
+//
+// It is also wrong as biology at the size it was policing. Baleen whales and
+// whale sharks are the largest animals that have ever lived and they eat
+// plankton; being big does not stop you filtering, it stops you filtering
+// EFFICIENTLY without the apparatus for it. The penalty belongs, but an order
+// of magnitude further out, where it separates the genuinely enormous from the
+// merely large.
+pub const GRAZE_MASS_REF: f32 = 180.0;
 /// How much each unit of filter-mesh area raises the mass at which grazing
 /// stops paying. This is the whole point of the organ: it buys the right to
 /// be large AND still live on the food field.
@@ -610,6 +630,11 @@ pub const CONSPECIFIC_DENSITY_NORM: f32 = 4.0;
 // a flat population-wide tax that cut lineage counts and crashed
 // population in all 3 A/B seeds. A lineage under THRESHOLD of the world
 // pays nothing; past it, cost rises with the square of the excess share.
+/// A lineage is penalised only once it exceeds this multiple of its FAIR
+/// share (one over the number of lineages). Relative, not absolute: with few
+/// lineages an absolute threshold penalises everyone equally, which is not
+/// frequency dependence at all, just a tax.
+pub const PATHOGEN_FAIR_SHARE_MULT: f32 = 1.6;
 pub const PATHOGEN_SHARE_THRESHOLD: f32 = 0.08;
 pub const PATHOGEN_SHARE_SCALE: f32 = 0.22;
 pub const PATHOGEN_PRESSURE_MAX: f32 = 2.5;
@@ -745,7 +770,17 @@ pub const SNOW_SOURCE_DEPTH: usize = 90;
 /// ocean makes; SNOW_SOURCE_DEPTH only decides how it is spread through the
 /// water. Keeping them separate is deliberate -- conflating them once turned a
 /// change meant to spread the population out into a ninefold food increase.
-pub const SNOW_PRODUCTION_ROWS: f32 = 6.0;
+// Raised on the ablation's evidence: of every mechanism tested, only richer
+// plankton restored viability. Total production is the lever, calories per
+// unit is the fatness knob -- they were conflated for most of the night, and
+// production is what the world was short of.
+// The two knobs do different jobs and this is the whole reason to keep them
+// apart: PRODUCTION sets how many animals the ocean can carry, CALORIES set how
+// fat any one of them gets. Wanting thin plankton is a statement about
+// calories; it was repeatedly answered by cutting production, which starved
+// the world instead of leaning it. Production raised to carry a real
+// population, calories left low so nothing grows fat on it.
+pub const SNOW_PRODUCTION_ROWS: f32 = 32.0;
 /// Contrast of the horizontal productivity bands. Above 1 deepens the barren
 /// stretches without touching the rich ones, so the ocean has real deserts in
 /// it rather than a gentle ripple.
@@ -1031,6 +1066,15 @@ pub struct World {
     /// visible -- every previous calorie change was a guess against an unknown
     /// baseline. Tuning a number nobody can see is how the density regulator
     /// ended up disabled for hours.
+    /// Where the world's energy GOES, accumulated per sink. Income was
+    /// instrumented and immediately overturned an assumption; expenditure was
+    /// not, so "swimming is too expensive" has been unanswerable -- there was
+    /// no way to see what fraction of a living movement actually costs.
+    pub spend_metabolism: f64,
+    pub spend_movement: f64,
+    pub spend_crowding: f64,
+    pub spend_disease: f64,
+    pub spend_reproduction: f64,
     pub income_plankton: f64,
     pub income_predation: f64,
     pub income_scavenge: f64,
@@ -1202,6 +1246,11 @@ impl World {
             deaths_disease: 0,
             whale_falls: 0,
             leviathans: 0,
+            spend_metabolism: 0.0,
+            spend_movement: 0.0,
+            spend_crowding: 0.0,
+            spend_disease: 0.0,
+            spend_reproduction: 0.0,
             income_plankton: 0.0,
             income_predation: 0.0,
             income_scavenge: 0.0,
@@ -1502,6 +1551,11 @@ impl World {
         d.set_item("diseased", self.deaths_disease).unwrap();
         d.set_item("whale_falls", self.whale_falls).unwrap();
         d.set_item("leviathans", self.leviathans).unwrap();
+        d.set_item("spend_metabolism", self.spend_metabolism).unwrap();
+        d.set_item("spend_movement", self.spend_movement).unwrap();
+        d.set_item("spend_crowding", self.spend_crowding).unwrap();
+        d.set_item("spend_disease", self.spend_disease).unwrap();
+        d.set_item("spend_reproduction", self.spend_reproduction).unwrap();
         d.set_item("income_plankton", self.income_plankton).unwrap();
         d.set_item("income_predation", self.income_predation).unwrap();
         d.set_item("income_scavenge", self.income_scavenge).unwrap();
