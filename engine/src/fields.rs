@@ -317,7 +317,27 @@ impl Fields {
         // zone received a full dose. The world then looked MORE crowded after a
         // change meant to decongest it -- not a paradox, just an ocean that had
         // quietly become nine times richer.
-        let lit_of = |y: usize| 0.25 + 0.75 * ((y - top) as f32 / zone as f32);
+        // A DEEP CHLOROPHYLL MAXIMUM: production peaks BELOW the surface.
+        //
+        // Production used to rise monotonically toward the surface, so the top
+        // row was strictly the richest water in the world and animals squatted
+        // on it -- the same failure as the original six-row band, just with a
+        // gentler slope. A monotonic gradient always has its best point at one
+        // end, and that end is where everything goes.
+        //
+        // Real oceans do not work that way. Light comes from above but
+        // nutrients come from below, and the two together put the chlorophyll
+        // maximum at a depth, not at the surface -- it is one of the most
+        // reliable features of open water. A peak in the middle means the best
+        // place to be is somewhere IN the column, that being there means
+        // giving up the surface, and that the animals above and below you are
+        // making a different living.
+        let peak = top as f32 + zone as f32 * (1.0 - crate::SNOW_PEAK_DEPTH_FRAC);
+        let spread_rows = (zone as f32 * crate::SNOW_PEAK_WIDTH).max(1.0);
+        let lit_of = |y: usize| {
+            let d = (y as f32 - peak) / spread_rows;
+            (-(d * d)).exp().max(0.02)
+        };
         let lit_total: f32 = (top..n).map(lit_of).sum::<f32>().max(1e-6);
         let spread = production_rows / lit_total;
         // Horizontal structure: where the water is productive, and where it is

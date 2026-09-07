@@ -110,7 +110,13 @@ pub const GRAZE_SWEPT_RATE: f32 = 0.90;
 // speeds animals actually reach, so the new term did not replace what the old
 // one lost. The world went extinct at tick 3707. Sweeping is a BONUS on top of
 // a viable baseline, not a substitute for it.
-pub const GRAZE_SURFACE_RATE: f32 = 0.045;
+// Doubled. Standing food sits around 0.50 -- abundant and going uneaten --
+// while 68% of deaths are starvation, which means the limit is not supply but
+// what an animal can physically strain out of the water. Raising intake lets
+// the population actually exploit what is there, which is also the only way
+// competition comes back: animals cannot compete over a resource none of them
+// can reach.
+pub const GRAZE_SURFACE_RATE: f32 = 0.095;
 /// Intake scales as feeding capacity to this power. Below the metabolic
 /// exponent of 0.75 on purpose: that ordering -- intake shallower than upkeep
 /// -- is what gives a finite best size and keeps small bodies viable.
@@ -715,6 +721,19 @@ pub const CORPSE_BITE_PER_MOUTH: f32 = 4.0;
 /// off; a stripped carcass should barely register.
 pub const CARRION_SCENT_PER_ENERGY: f32 = 0.010;
 pub const CARRION_SCENT_MAX: f32 = 4.0;
+/// Carrion rots. Without this a carcass nobody ate persisted forever, and they
+/// accumulated into thousands of bodies and tens of thousands of draw calls.
+pub const CORPSE_DECAY_RATE: f32 = 0.0016;
+/// What fraction of the decayed matter returns to the water as plankton, so an
+/// unclaimed body feeds the base of the food web rather than disappearing.
+pub const CORPSE_DECAY_TO_FOOD: f32 = 0.35;
+pub const CORPSE_MIN_ENERGY: f32 = 0.4;
+// Lowered again: at 260, with whale falls carrying up to 130 components each,
+// the published state was still 589 KB six times a second. Carrion should be
+// an event, not a permanent layer of scenery.
+pub const MAX_CORPSES: usize = 90;
+/// How many points of a carcass are published. It only has to read as one.
+pub const CORPSE_PUBLISH_POINTS: usize = 12;
 /// What fraction of a bite is burned fighting a carcass that is still sinking,
 /// at the very top of the column. Falls away quadratically with depth, so a
 /// settled carcass on the bottom is nearly free to eat.
@@ -780,6 +799,13 @@ pub const SNOW_SOURCE_DEPTH: usize = 90;
 // calories; it was repeatedly answered by cutting production, which starved
 // the world instead of leaning it. Production raised to carry a real
 // population, calories left low so nothing grows fat on it.
+/// Where in the photic zone production peaks, as a fraction of the zone's
+/// depth below its top. Not at the surface: a monotonic gradient has its best
+/// point at one end and everything piles up there, which is exactly what was
+/// happening. Real oceans put the chlorophyll maximum at depth, because light
+/// comes from above and nutrients from below.
+pub const SNOW_PEAK_DEPTH_FRAC: f32 = 0.45;
+pub const SNOW_PEAK_WIDTH: f32 = 0.30;
 pub const SNOW_PRODUCTION_ROWS: f32 = 32.0;
 /// Contrast of the horizontal productivity bands. Above 1 deepens the barren
 /// stretches without touching the rich ones, so the ocean has real deserts in
@@ -1070,6 +1096,14 @@ pub struct World {
     /// instrumented and immediately overturned an assumption; expenditure was
     /// not, so "swimming is too expensive" has been unanswerable -- there was
     /// no way to see what fraction of a living movement actually costs.
+    /// Energy earned and then thrown away because the animal's larder was
+    /// already full. Instrumented because income currently exceeds
+    /// expenditure by 2.46x while 71% of deaths are starvation, which can only
+    /// mean the surplus is going somewhere unaccounted -- and a cap that
+    /// discards most of what an animal earns would leave it with no reserve
+    /// for the first interruption, which looks exactly like starving amid
+    /// plenty.
+    pub spend_capped: f64,
     pub spend_metabolism: f64,
     pub spend_movement: f64,
     pub spend_crowding: f64,
@@ -1246,6 +1280,7 @@ impl World {
             deaths_disease: 0,
             whale_falls: 0,
             leviathans: 0,
+            spend_capped: 0.0,
             spend_metabolism: 0.0,
             spend_movement: 0.0,
             spend_crowding: 0.0,
@@ -1294,9 +1329,18 @@ impl World {
 
     fn spawn_random(&mut self, n: u32) {
         for _ in 0..n {
+            // Founders start in the productive band, not spread through the
+            // whole column. Spawning uniformly dropped most of them into
+            // barren water below the photic zone with ten units of energy and
+            // nothing to eat, so the founding population collapsed from three
+            // hundred to a handful before any of it could establish -- which
+            // then looked like the world being unviable when it was really the
+            // starting conditions being unsurvivable.
+            let zone_lo = self.size as f32 * 0.45;
+            let zone_hi = self.size as f32 * 0.97;
             let mut pos = [
                 self.rng.random_range(0.0..self.size as f32),
-                self.rng.random_range(0.0..self.size as f32),
+                self.rng.random_range(zone_lo..zone_hi),
             ];
             for _ in 0..20 {
                 // Avoid Rock (impassable) and Sand (now a real solid surface
@@ -1309,7 +1353,7 @@ impl World {
                 }
                 pos = [
                     self.rng.random_range(0.0..self.size as f32),
-                    self.rng.random_range(0.0..self.size as f32),
+                    self.rng.random_range(zone_lo..zone_hi),
                 ];
             }
             let color = [
@@ -1551,6 +1595,7 @@ impl World {
         d.set_item("diseased", self.deaths_disease).unwrap();
         d.set_item("whale_falls", self.whale_falls).unwrap();
         d.set_item("leviathans", self.leviathans).unwrap();
+        d.set_item("spend_capped", self.spend_capped).unwrap();
         d.set_item("spend_metabolism", self.spend_metabolism).unwrap();
         d.set_item("spend_movement", self.spend_movement).unwrap();
         d.set_item("spend_crowding", self.spend_crowding).unwrap();
@@ -2063,7 +2108,17 @@ impl World {
     fn corpses_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
         let list = PyList::empty(py);
         for c in &self.corpses {
-            let positions: Vec<[f32; 2]> = c.local_shape.iter().map(|o| [o[0] + c.root_pos[0], o[1] + c.root_pos[1]]).collect();
+            // A whale fall carries up to 130 components and the shape only has
+            // to READ as a carcass, so publish a subsample rather than every
+            // point: the difference on screen is nil and the state payload was
+            // running to a megabyte several times a second.
+            let step = (c.local_shape.len() / crate::CORPSE_PUBLISH_POINTS).max(1);
+            let positions: Vec<[f32; 2]> = c
+                .local_shape
+                .iter()
+                .step_by(step)
+                .map(|o| [o[0] + c.root_pos[0], o[1] + c.root_pos[1]])
+                .collect();
             let d = PyDict::new(py);
             d.set_item("positions", positions).unwrap();
             d.set_item("color", [c.color[0] as u32, c.color[1] as u32, c.color[2] as u32]).unwrap();

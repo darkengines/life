@@ -1993,7 +1993,15 @@ pub fn tick(world: &mut World) {
                 let take = if world.graze_half_saturation <= 0.0 {
                     here.min(per_part)
                 } else {
-                    per_part * here / (here + world.graze_half_saturation)
+                    // Clamped to what is actually present. The saturating form
+                    // exceeds `here` whenever per_part is larger than the
+                    // half-saturation constant -- which it is, once intake was
+                    // raised -- so grazing was removing more plankton than the
+                    // cell contained and driving the food field NEGATIVE
+                    // (measured at -0.0284 mean). A negative concentration then
+                    // feeds back into every gradient and every subsequent
+                    // intake calculation as though the water owed food.
+                    (per_part * here / (here + world.graze_half_saturation)).min(here)
                 };
                 if take <= 1e-6 { continue; }
                 world.fields.food[c] = here - take;
@@ -2439,6 +2447,7 @@ pub fn tick(world: &mut World) {
         if !world.individuals.alive[slot] { continue; }
         let cap = storage_capacity(world, slot);
         if world.individuals.energy[slot] > cap {
+            world.spend_capped += (world.individuals.energy[slot] - cap) as f64;
             world.individuals.energy[slot] = cap;
         }
     }
@@ -2542,7 +2551,43 @@ pub fn tick(world: &mut World) {
         let scent = (energy * crate::CARRION_SCENT_PER_ENERGY).min(crate::CARRION_SCENT_MAX);
         world.fields.blood[idx] += scent * world.dt;
     }
-    world.corpses.retain(|c| c.energy > 0.01);
+    // Carrion ROTS. Corpses only ever lost energy by being eaten, so anything
+    // nobody got round to eating stayed in the world forever: 1465 corpses
+    // carrying 27258 points had accumulated, which is a 2.3 MB state payload
+    // published six times a second and tens of thousands of draw calls a
+    // frame. That is the whole reason the view is clunky, and it is also just
+    // wrong -- a carcass on the seabed is consumed by things far smaller than
+    // anything modelled here, and it does not last indefinitely.
+    //
+    // Decaying returns some of it to the water as well, so an unclaimed body
+    // feeds the plankton instead of vanishing: the nutrients go back into the
+    // system the way they actually do.
+    let decay = crate::CORPSE_DECAY_RATE;
+    for i in 0..world.corpses.len() {
+        let lost = world.corpses[i].energy * decay;
+        world.corpses[i].energy -= lost;
+        let pos = world.corpses[i].root_pos;
+        let (cx, cy) = grid_xy(world, pos);
+        let idx = (cx * world.size + cy) as usize;
+        world.fields.food[idx] =
+            (world.fields.food[idx] + lost * crate::CORPSE_DECAY_TO_FOOD).min(world.food_cap);
+        // Shrink the remains to match, so a rotting carcass is visibly going.
+        let c = &mut world.corpses[i];
+        if c.initial_energy > 0.0 && !c.local_shape.is_empty() {
+            let frac = (c.energy / c.initial_energy).clamp(0.0, 1.0);
+            let want = ((c.local_shape.len() as f32) * frac).ceil() as usize;
+            if want < c.local_shape.len() {
+                c.local_shape.truncate(want.max(1));
+            }
+        }
+    }
+    world.corpses.retain(|c| c.energy > crate::CORPSE_MIN_ENERGY);
+    // Hard ceiling as a backstop, keeping the richest: a pathological case
+    // should degrade the oldest scraps rather than the framerate.
+    if world.corpses.len() > crate::MAX_CORPSES {
+        world.corpses.sort_by(|a, b| b.energy.partial_cmp(&a.energy).unwrap_or(std::cmp::Ordering::Equal));
+        world.corpses.truncate(crate::MAX_CORPSES);
+    }
     timings.push(("corpses", t0.elapsed().as_secs_f64() * 1000.0));
 
     let t0 = std::time::Instant::now();
