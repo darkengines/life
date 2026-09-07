@@ -174,6 +174,16 @@ pub const PLANKTON_CALORIES: f32 = 0.80;
 /// How long a newly-changed body plan is shielded from full selection while
 /// its inherited controller readapts. See Individuals::innovation_protect.
 pub const NEURITE_MUTATION_STD: f32 = 0.06;
+/// How far a component's beat drifts from its parent's when inherited. Phase
+/// in radians: a quarter cycle is about 1.57, and neighbouring joints roughly
+/// that far apart is what makes a tip trace a circle rather than a line.
+pub const PART_PHASE_MUTATION_STD: f32 = 0.35;
+pub const PART_FREQ_MUTATION_STD: f32 = 0.10;
+/// How strongly a component's own neural unit can modulate its stroke.
+pub const PART_DRIVE_AUTHORITY: f32 = 0.8;
+/// Ceiling on how much an organ's beat can multiply its effect, so a fast
+/// stroke is worth having without being worth everything.
+pub const ORGAN_BEAT_MAX: f32 = 3.0;
 pub const INNOVATION_PROTECT_TICKS: u32 = 260;
 /// How much of the usual pressure a protected animal feels.
 pub const INNOVATION_PROTECT_METABOLISM: f32 = 0.55;
@@ -1695,6 +1705,11 @@ impl World {
         d.set_item("latent", latent).unwrap();
         d.set_item("hidden", hidden).unwrap();
         d.set_item("body", body).unwrap();
+        // What each component is being told to do right now.
+        let pdrive: Vec<f32> = (0..self.individuals.pixel_count[slot] as usize)
+            .map(|k| self.pixels.drive[self.individuals.pixel_offset[slot] as usize + k])
+            .collect();
+        d.set_item("part_drive", pdrive).unwrap();
         d.set_item("act", act).unwrap();
         d.set_item("act_labels", individuals::ACT_LABELS.to_vec()).unwrap();
         let offset = self.individuals.pixel_offset[slot] as usize;

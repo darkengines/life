@@ -565,6 +565,51 @@ impl Individuals {
         (z.to_vec(), h, out, body.to_vec())
     }
 
+    /// Runs the body's network and WRITES each component's drive back into the
+    /// arena, so the next tick's kinematics actuate every organ individually.
+    ///
+    /// This is the fine control: rather than the brain setting one effort dial
+    /// for the whole animal, each component's own unit decides how hard that
+    /// component beats. Run in the sequential phase because it mutates the
+    /// arena; a one-tick lag between deciding and moving is of no consequence
+    /// at these timescales.
+    pub fn apply_part_drive(
+        individuals: &Individuals,
+        pixels: &mut PixelArena,
+        slot: usize,
+        h: &[f32; HIDDEN_DIM],
+    ) {
+        let offset = individuals.pixel_offset[slot] as usize;
+        let count = individuals.pixel_count[slot] as usize;
+        if count == 0 { return; }
+        let mut sig = vec![[0.0f32; NEURITE_DIM]; count];
+        for d in 0..NEURITE_DIM {
+            sig[0][d] = h[d % HIDDEN_DIM];
+        }
+        pixels.drive[offset] = sig[0][0];
+        for k in 1..count {
+            let parent = pixels.parent_idx[offset + k];
+            if parent < 0 { continue; }
+            let p = parent as usize;
+            if p >= k { continue; }
+            // Dead tissue conducts nothing and actuates nothing.
+            if pixels.dead[offset + k] {
+                pixels.drive[offset + k] = -1.0;
+                continue;
+            }
+            let w = &pixels.neurite[offset + k];
+            let b = &pixels.memory[offset + k];
+            for row in 0..NEURITE_DIM {
+                let mut acc = b[row % MEM_DIM];
+                for col in 0..NEURITE_DIM {
+                    acc += w[row * NEURITE_DIM + col] * sig[p][col];
+                }
+                sig[k][row] = acc.tanh();
+            }
+            pixels.drive[offset + k] = sig[k][0];
+        }
+    }
+
     /// Runs the body's own network: the hidden layer seeds the root, and every
     /// component transforms what its parent passes down into what it passes to
     /// its children. Returns the pooled result, which is what the body as a
@@ -640,7 +685,7 @@ impl Individuals {
         sense: &[f32; SENSE_DIM],
         enc_w: &[f32],
         enc_b: &[f32],
-    ) -> [f32; ACT_DIM] {
+    ) -> ([f32; ACT_DIM], [f32; HIDDEN_DIM]) {
         let z = Self::encode(sense, enc_w, enc_b);
         let w1 = self.brain_w1(slot);
         let b1 = self.brain_b1(slot);
@@ -672,7 +717,9 @@ impl Individuals {
             }
             out[j] = acc.tanh();
         }
-        out
+        // The hidden layer comes back too: it seeds the per-component drive,
+        // which is applied in the sequential phase where the arena is mutable.
+        (out, h)
     }
 }
 
@@ -812,6 +859,9 @@ pub fn remove_leaf(individuals: &mut Individuals, pixels: &mut PixelArena, slot:
         pixels.memory[dst] = pixels.memory[src];
         pixels.neurite[dst] = pixels.neurite[src];
         pixels.dead[dst] = pixels.dead[src];
+        pixels.phase_offset[dst] = pixels.phase_offset[src];
+        pixels.freq_mult[dst] = pixels.freq_mult[src];
+        pixels.drive[dst] = pixels.drive[src];
         pixels.storage[dst] = pixels.storage[src];
         pixels.size[dst] = pixels.size[src];
         pixels.min_angle[dst] = pixels.min_angle[src];
@@ -1003,6 +1053,9 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.memory[new_offset as usize + k] = pixels.memory[offset as usize + k];
         pixels.neurite[new_offset as usize + k] = pixels.neurite[offset as usize + k];
         pixels.dead[new_offset as usize + k] = pixels.dead[offset as usize + k];
+        pixels.phase_offset[new_offset as usize + k] = pixels.phase_offset[offset as usize + k];
+        pixels.freq_mult[new_offset as usize + k] = pixels.freq_mult[offset as usize + k];
+        pixels.drive[new_offset as usize + k] = pixels.drive[offset as usize + k];
         pixels.storage[new_offset as usize + k] = pixels.storage[offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[offset as usize + k];
@@ -1025,6 +1078,18 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
     // A brand new part brings a brand new random feature -- see random_neurite.
     pixels.neurite[new_offset as usize + count as usize] = random_neurite(rng);
     pixels.dead[new_offset as usize + count as usize] = false;
+    // A new appendage gets its own beat. Drawn near the parent's so a limb
+    // stays roughly coherent with what it grew from, but free to drift -- a
+    // quarter-cycle lag between neighbouring joints is exactly what turns a
+    // flat wave into a circular stroke, and it has to be reachable by
+    // mutation for anything to find it.
+    let par_phase = pixels.phase_offset[new_offset as usize + parent_local];
+    let par_freq = pixels.freq_mult[new_offset as usize + parent_local];
+    pixels.phase_offset[new_offset as usize + count as usize] =
+        par_phase + normal(rng, 0.0, crate::PART_PHASE_MUTATION_STD);
+    pixels.freq_mult[new_offset as usize + count as usize] =
+        (par_freq + normal(rng, 0.0, crate::PART_FREQ_MUTATION_STD)).clamp(0.25, 4.0);
+    pixels.drive[new_offset as usize + count as usize] = 0.0;
     let new_size = inherit_scalar(rng, parent_size, crate::PART_SIZE_MUTATION_STD, crate::PART_SIZE_MIN, crate::PART_SIZE_MAX);
     let (mut new_min, mut new_max) = (
         inherit_scalar(rng, parent_min_angle, crate::PART_ANGLE_MUTATION_STD, -std::f32::consts::PI, std::f32::consts::PI),
@@ -1065,6 +1130,10 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         // A mirrored twin is the same organ, so it computes the same thing.
         pixels.neurite[m] = pixels.neurite[t];
         pixels.dead[m] = false;
+        // A mirrored pair beats together, like a real pair of fins.
+        pixels.phase_offset[m] = pixels.phase_offset[t];
+        pixels.freq_mult[m] = pixels.freq_mult[t];
+        pixels.drive[m] = 0.0;
         pixels.part_type[m] = pixels.part_type[t];
         pixels.size[m] = pixels.size[t];
         // Hinge limits mirror too, so the pair bends symmetrically rather
@@ -1098,6 +1167,9 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     pixels.memory[offset as usize] = [normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1), normal(rng, 0.0, 0.1)];
     pixels.neurite[offset as usize] = random_neurite(rng);
     pixels.dead[offset as usize] = false;
+    pixels.phase_offset[offset as usize] = 0.0;
+    pixels.freq_mult[offset as usize] = 1.0;
+    pixels.drive[offset as usize] = 0.0;
     let root_size = rng.random_range(0.6..1.4);
     pixels.size[offset as usize] = root_size;
     pixels.min_angle[offset as usize] = -rng.random_range(0.2..2.2);
@@ -1193,6 +1265,14 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
             inherit_neurite(rng, &pixels.neurite[parent_offset as usize + k]);
         // Offspring are born whole: scars are not inherited.
         pixels.dead[new_offset as usize + k] = false;
+        pixels.phase_offset[new_offset as usize + k] =
+            pixels.phase_offset[parent_offset as usize + k]
+                + normal(rng, 0.0, crate::PART_PHASE_MUTATION_STD);
+        pixels.freq_mult[new_offset as usize + k] =
+            (pixels.freq_mult[parent_offset as usize + k]
+                + normal(rng, 0.0, crate::PART_FREQ_MUTATION_STD))
+                .clamp(0.25, 4.0);
+        pixels.drive[new_offset as usize + k] = 0.0;
     }
 
     let color = if rng.random::<f32>() < crate::COLOR_MUTATION_RATE {

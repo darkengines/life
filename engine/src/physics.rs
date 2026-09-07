@@ -126,8 +126,25 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // curved body pushes water to one side, which is what produces the
         // torque that turns it -- the animal steers by SHAPING ITSELF, not by
         // having its orientation overwritten.
-        let raw_wave = world.pixels.mirror_sign[offset + k] * flex * amp
-            * (std::f32::consts::TAU * freq * t + phase + depth[k] * crate::BODY_WAVE_NUMBER).sin();
+        // Each component beats on its OWN phase and its own rate, modulated
+        // live by its own neural unit. The body rhythm is still the carrier --
+        // an animal has one heartbeat, not forty independent ones -- but every
+        // joint can lead or lag it and run faster or slower against it.
+        //
+        // This is what makes a circular stroke possible. A joint in the plane
+        // has one degree of freedom, so a limb tip only traces a circle when
+        // successive joints are driven about a quarter cycle apart; with a
+        // single shared phase every limb could only wave flat, back and forth.
+        // It is also how real appendages work: cilia beat in circles, a fin's
+        // rays lag one another to throw a wave along the edge, and a rowing
+        // limb runs a fast power stroke against a slow recovery.
+        let part_drive = 1.0 + crate::PART_DRIVE_AUTHORITY * world.pixels.drive[offset + k];
+        let raw_wave = world.pixels.mirror_sign[offset + k] * flex * amp * part_drive.max(0.0)
+            * (std::f32::consts::TAU * freq * world.pixels.freq_mult[offset + k] * t
+                + phase
+                + world.pixels.phase_offset[offset + k]
+                + depth[k] * crate::BODY_WAVE_NUMBER)
+                .sin();
         // Joint angle limits: a real hinge constraint on how far THIS
         // joint's animated bend can deviate from its rest pose, heritable
         // per part (pixels.rs's min_angle/max_angle). Previously every
@@ -1010,6 +1027,33 @@ pub(crate) fn organ_area(world: &World, slot: usize, kind: u8) -> f32 {
     area * world.individuals.size_scale[slot]
 }
 
+/// Organ area weighted by how hard each organ is BEATING.
+///
+/// An organ's function should follow from what it does, not merely from its
+/// presence. A filtering mesh pumps water: how much it moves depends on how
+/// fast and how strongly it beats, which is exactly how sessile suspension
+/// feeders make a living without going anywhere -- a barnacle, a tube worm and
+/// a mussel all sit still and drive water through a comb. Tying the organ to
+/// its own actuation makes that strategy available, gives the per-component
+/// rate and drive something to be selected FOR, and means an animal can invest
+/// in pumping harder rather than only in growing more mesh.
+pub(crate) fn organ_beat_area(world: &World, slot: usize, kind: u8) -> f32 {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let count = world.individuals.pixel_count[slot] as usize;
+    let mut total = 0.0;
+    for k in 0..count {
+        if world.pixels.part_type[offset + k] != kind || world.pixels.dead[offset + k] { continue; }
+        let g = crate::pixels::girth(&world.pixels, offset + k);
+        let area = g * g / crate::PART_AREA_REF;
+        // Stroke rate times stroke strength: what the organ actually moves.
+        let beat = world.pixels.freq_mult[offset + k]
+            * (1.0 + crate::PART_DRIVE_AUTHORITY * world.pixels.drive[offset + k]).max(0.0)
+            * world.pixels.flex[offset + k];
+        total += area * beat.min(crate::ORGAN_BEAT_MAX);
+    }
+    total * world.individuals.size_scale[slot]
+}
+
 /// How much energy this body can actually hold.
 ///
 /// Built from the evolved per-part `storage` trait and from gut tissue, each
@@ -1463,11 +1507,12 @@ pub fn tick(world: &mut World) {
     // death) has real cross-individual mutation and stays sequential --
     // that's the actual reason this couldn't just be one big par_iter.
     let t0 = std::time::Instant::now();
-    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32, [f32; 2], f32)> = deciding
+    let mut pre: Vec<([f32; ACT_DIM], [f32; 2], [f32; 2], Option<ExperienceRow>, f32, f32, [f32; 2], f32, [f32; 2], f32, [f32; crate::individuals::HIDDEN_DIM])> = deciding
         .par_iter()
         .map(|&slot| {
             let (s, conspecific_density) = sense(world, slot, &grid);
-            let mut d: [f32; ACT_DIM] = world.individuals.decide(&world.pixels, slot, &s, &world.shared_enc_w, &world.shared_enc_b);
+            let (mut d, hidden): ([f32; ACT_DIM], [f32; crate::individuals::HIDDEN_DIM]) =
+                world.individuals.decide(&world.pixels, slot, &s, &world.shared_enc_w, &world.shared_enc_b);
             // Scrambling control. Blended deterministically from slot and
             // tick rather than from the RNG, because this closure runs in
             // parallel and has to stay a pure function of tick-start state.
@@ -1521,7 +1566,7 @@ pub fn tick(world: &mut World) {
             };
             // Raw density carried through rather than re-scanning
             // neighbors in the sequential phase where the drain is applied.
-            (d, thrust, contact, sample, conspecific_density, torque, com, moment, separation, pressure)
+            (d, thrust, contact, sample, conspecific_density, torque, com, moment, separation, pressure, hidden)
         })
         .collect();
     timings.push(("decide_parallel", t0.elapsed().as_secs_f64() * 1000.0));
@@ -1548,8 +1593,12 @@ pub fn tick(world: &mut World) {
         // reproductions collapsed onto one row (observed reaching 28), which
         // is not a per-step reward at all and wrecked the training targets.
         world.individuals.pending_reward[slot] = 0.0;
-        let (d, thrust, contact, _, crowding, torque, com, moment, separation, pressure) = &pre[i];
+        let (d, thrust, contact, _, crowding, torque, com, moment, separation, pressure, hidden) = &pre[i];
         let pressure = *pressure;
+        // Actuate every organ from its own neural unit, for the next tick.
+        let hidden = *hidden;
+        crate::individuals::Individuals::apply_part_drive(
+            &world.individuals, &mut world.pixels, slot, &hidden);
         pressure_sum += pressure;
         pressure_n += 1.0;
         if pressure > pressure_max { pressure_max = pressure; }
@@ -1845,7 +1894,9 @@ pub fn tick(world: &mut World) {
             // Tying yield to swept volume makes the strategy cost what it
             // should: a filter feeder has to keep swimming to eat, and pays
             // the movement energy to do it.
-            let filter_area = organ_area(world, slot, crate::pixels::PART_FILTER);
+            // Weighted by beat: a mesh that is pumping strains water even
+            // when the animal itself is going nowhere.
+            let filter_area = organ_beat_area(world, slot, crate::pixels::PART_FILTER);
             let vel = world.individuals.velocity[slot];
             let speed_frac =
                 ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() / crate::FILTER_FLOW_SPEED).clamp(0.0, 1.0);
@@ -1883,8 +1934,12 @@ pub fn tick(world: &mut World) {
             // not. Structural tissue can still absorb a little -- small
             // animals really do -- but an animal that wants to live on
             // plankton has to grow the apparatus for it.
-            let feeding_organs = organ_area(world, slot, crate::pixels::PART_FILTER)
-                + organ_area(world, slot, crate::pixels::PART_MOUTH) * 0.4;
+            // Feeding apparatus counted by how hard it is working, so pumping
+            // is a real alternative to swimming for getting water through a
+            // filter -- which is the whole living of every sessile suspension
+            // feeder in the sea.
+            let feeding_organs = organ_beat_area(world, slot, crate::pixels::PART_FILTER)
+                + organ_beat_area(world, slot, crate::pixels::PART_MOUTH) * 0.4;
             // Sublinear in surface, which is the part that was still wrong.
             //
             // Charging intake on exposed surface was supposed to stop bigger

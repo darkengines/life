@@ -27,6 +27,29 @@ pub struct PixelArena {
     /// presents no feeding surface, performs no organ function, and passes no
     /// signal to the components beyond it -- so anything distal to a dead node
     /// is cut off from the brain while still being carried.
+    /// Per-component actuation: its own phase offset and its own rate
+    /// multiplier on the body's rhythm.
+    ///
+    /// The whole animal used to move on ONE travelling wave -- every joint
+    /// beating at the same frequency, its position in the wave set only by how
+    /// far it sits from the head. A part could differ in amplitude and nothing
+    /// else, so no organ could beat independently of the body carrying it, and
+    /// a CIRCULAR stroke was not expressible at all: a joint in the plane has
+    /// one degree of freedom, and a tip only traces a circle when successive
+    /// joints are driven a quarter cycle apart. With a single shared phase,
+    /// every limb could only wave flat back and forth.
+    ///
+    /// Real appendages are not slaved to the trunk like that. A cilium beats
+    /// in a circle, a fin's rays lag one another to throw a wave along the
+    /// edge, and rowing limbs run a fast power stroke against a slow recovery.
+    /// All of that is phase and rate, which is what these two numbers are.
+    pub phase_offset: Vec<f32>,
+    pub freq_mult: Vec<f32>,
+    /// Live neural modulation of this component's stroke, written each tick
+    /// from the part's own neural unit. This is the fine control: the brain
+    /// drives each organ individually rather than setting one dial for the
+    /// whole body.
+    pub drive: Vec<f32>,
     pub dead: Vec<bool>,
     pub memory: Vec<[f32; 4]>,
     /// This component's own little neural unit.
@@ -179,7 +202,8 @@ pub fn girth(pixels: &PixelArena, idx: usize) -> f32 {
 impl PixelArena {
     pub fn new() -> Self {
         PixelArena {
-            parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(), dead: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
+            parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(),
+            phase_offset: Vec::new(), freq_mult: Vec::new(), drive: Vec::new(), dead: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
             part_type: Vec::new(),
             symmetric: Vec::new(),
@@ -204,6 +228,9 @@ impl PixelArena {
         self.parent_idx.resize(new_len as usize, -1);
         self.rest_angle.resize(new_len as usize, 0.0);
         self.flex.resize(new_len as usize, 1.0);
+        self.phase_offset.resize(new_len as usize, 0.0);
+        self.freq_mult.resize(new_len as usize, 1.0);
+        self.drive.resize(new_len as usize, 0.0);
         self.dead.resize(new_len as usize, false);
         self.memory.resize(new_len as usize, [0.0; 4]);
         self.neurite.resize(
