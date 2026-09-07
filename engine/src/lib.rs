@@ -45,7 +45,23 @@ pub const JOINT_LEN: f32 = 1.0;
 pub const REPRODUCE_BASE_COST: f32 = 4.0;
 pub const REPRODUCE_COST_PER_PART: f32 = 1.2;
 pub const REPRODUCE_ENERGY_BUFFER: f32 = 7.0;
-pub const MATURITY_AGE: f32 = 60.0;
+// Sixty ticks was barely a childhood: animals bred almost immediately and died
+// at a mean age of 580, so nothing an adult could be good at had time to
+// matter. A real maturation period is what makes surviving to adulthood an
+// achievement worth having traits for.
+// 300 was too far: births fell to 0.02/tick and the population went 299 -> 3
+// with 97% starvation. Mean age did rise from 580 to 1715, so the intended
+// effect was real -- animals lived long lives -- but almost none of them ever
+// bred, which is a different failure, not a success.
+pub const MATURITY_AGE: f32 = 130.0;
+/// Breeding costs at least this share of the parent's storage capacity, so a
+/// birth is an investment proportional to the animal rather than an absolute
+/// that inflation makes trivial.
+pub const REPRO_CAPACITY_FRACTION: f32 = 0.18;
+/// How much of that cost is handed to the offspring instead of vanishing.
+/// Parental investment: it is what lets fewer, better-provisioned young be a
+/// viable strategy rather than an unrewarded handicap.
+pub const REPRO_ENDOWMENT_SHARE: f32 = 0.55;
 // Measured directly: at typical population density in this world size,
 // median nearest-neighbor distance is ~10.5 units -- the old 2.5 radius
 // meant under 15% of individuals ever had anyone in range at all, which was
@@ -76,10 +92,25 @@ pub const EAT_RATE: f32 = 2.0;
 /// mostly about how much water a body moves through, which is what makes a
 /// wide body held across the flow worth building and makes sitting still a
 /// poor living.
-pub const GRAZE_SWEPT_RATE: f32 = 0.030;
+// Raised tenfold after measuring what it was actually contributing. At typical
+// speeds (~0.07 units/tick) and a frontal width of about five, sweeping added
+// 0.01 against a passive surface term of 0.12 -- so the swept-volume term was
+// a rounding error and applied none of the shape pressure it was added for.
+// It now roughly doubles intake for an animal that is actually moving, which
+// is a real reason to swim, while the passive term still keeps a drifting
+// animal alive: making intake depend ENTIRELY on speed would be a starvation
+// spiral, since a weakened animal that cannot swim could never eat its way
+// back.
+pub const GRAZE_SWEPT_RATE: f32 = 0.90;
 /// Passive absorption through exposed surface. Deliberately small -- it keeps
 /// a drifting animal alive rather than feeding it.
-pub const GRAZE_SURFACE_RATE: f32 = 0.012;
+// Restored to near its old value. Cutting this from 0.057 to 0.010 while
+// adding the swept-volume term was an intake cut of roughly five times
+// disguised as a rebalance -- swept volume contributes almost nothing at the
+// speeds animals actually reach, so the new term did not replace what the old
+// one lost. The world went extinct at tick 3707. Sweeping is a BONUS on top of
+// a viable baseline, not a substitute for it.
+pub const GRAZE_SURFACE_RATE: f32 = 0.045;
 /// Intake scales as feeding capacity to this power. Below the metabolic
 /// exponent of 0.75 on purpose: that ordering -- intake shallower than upkeep
 /// -- is what gives a finite best size and keeps small bodies viable.
@@ -595,7 +626,17 @@ pub const PATHOGEN_PRESSURE_MAX: f32 = 2.5;
 // it cannot be outgrown by an inflating energy economy. At full pressure a
 // dominant lineage pays several times its own metabolism, which is what makes
 // being common genuinely costly.
-pub const PATHOGEN_DAMAGE_RATE: f32 = 6.0;
+// 6.0 was catastrophic and I should have checked the ceiling before choosing
+// it: PATHOGEN_PRESSURE_MAX is 2.5, so it meant up to FIFTEEN times a host's
+// upkeep, and the share threshold of 0.08 means that with only two or three
+// effective lineages every animal alive is over it. The result was an
+// invisible, unsurvivable drain applied to the whole world -- it killed
+// competent animals mid-journey for no visible reason, and it is the likeliest
+// cause of the extinction at tick 3707.
+//
+// At 0.9 the worst case is about 2.25x upkeep: a serious burden on being
+// common, which is the point, and survivable, which it has to be.
+pub const PATHOGEN_DAMAGE_RATE: f32 = 0.9;
 pub const DISEASE_RESISTANCE_METABOLIC_COST: f32 = 0.012;
 
 // Experience logging (see ExperienceRow). Stride 200 means, on average,
@@ -644,6 +685,11 @@ pub const CORPSE_EAT_RATE: f32 = 0.5;
 /// fall worth thousands of units took thousands of animal-ticks to clear and
 /// simply sat there looking untouched.
 pub const CORPSE_BITE_PER_MOUTH: f32 = 4.0;
+/// How strongly carrion scents the water, per unit of remaining energy, and
+/// the ceiling on it. A fresh whale fall should be findable from a long way
+/// off; a stripped carcass should barely register.
+pub const CARRION_SCENT_PER_ENERGY: f32 = 0.010;
+pub const CARRION_SCENT_MAX: f32 = 4.0;
 /// What fraction of a bite is burned fighting a carcass that is still sinking,
 /// at the very top of the column. Falls away quadratically with depth, so a
 /// settled carcass on the bottom is nearly free to eat.
@@ -700,6 +746,10 @@ pub const SNOW_SOURCE_DEPTH: usize = 90;
 /// water. Keeping them separate is deliberate -- conflating them once turned a
 /// change meant to spread the population out into a ninefold food increase.
 pub const SNOW_PRODUCTION_ROWS: f32 = 6.0;
+/// Contrast of the horizontal productivity bands. Above 1 deepens the barren
+/// stretches without touching the rich ones, so the ocean has real deserts in
+/// it rather than a gentle ripple.
+pub const SNOW_BAND_CONTRAST: f32 = 2.2;
 pub const SNOW_SINK_RATE: f32 = 0.22;
 pub const SNOW_FLOOR_DEPTH: usize = 14;
 pub const SNOW_FLOOR_DECAY: f32 = 0.06;
@@ -967,6 +1017,12 @@ pub struct World {
     /// visible whether crowding is actually regulating the population or just
     /// adding noise to the other causes.
     pub deaths_crowding: u64,
+    /// Deaths where disease drained the last of an animal's energy. Reported
+    /// separately because an unexplained death is the hardest kind of bug to
+    /// find: an animal that swims well, feeds well and then dies mid-journey
+    /// looks like broken physics from the outside, and there was no way to
+    /// tell that a frequency-dependent drain was killing it.
+    pub deaths_disease: u64,
     pub whale_falls: u64,
     pub leviathans: u64,
     /// Where the world's energy actually comes from, accumulated per source.
@@ -1045,6 +1101,7 @@ pub struct World {
     /// be swept TOGETHER rather than hand-tuned one at a time against a moving
     /// target -- which is how the last several settings were chosen, and none
     /// of them worked.
+    pub repro_capacity_fraction: f32,
     pub graze_half_saturation: f32,
     pub plankton_calories: f32,
     pub production_rows: f32,
@@ -1142,6 +1199,7 @@ impl World {
             deaths_predation: 0,
             deaths_popcap: 0,
             deaths_crowding: 0,
+            deaths_disease: 0,
             whale_falls: 0,
             leviathans: 0,
             income_plankton: 0.0,
@@ -1166,6 +1224,7 @@ impl World {
             brain_noise: 0.0,
             space_pressure_tolerance: SPACE_PRESSURE_TOLERANCE,
             space_pressure_mortality: SPACE_PRESSURE_MORTALITY,
+            repro_capacity_fraction: REPRO_CAPACITY_FRACTION,
             graze_half_saturation: GRAZE_HALF_SATURATION,
             plankton_calories: PLANKTON_CALORIES,
             production_rows: SNOW_PRODUCTION_ROWS,
@@ -1440,6 +1499,7 @@ impl World {
         d.set_item("eaten", self.deaths_predation).unwrap();
         d.set_item("culled", self.deaths_popcap).unwrap();
         d.set_item("crowded", self.deaths_crowding).unwrap();
+        d.set_item("diseased", self.deaths_disease).unwrap();
         d.set_item("whale_falls", self.whale_falls).unwrap();
         d.set_item("leviathans", self.leviathans).unwrap();
         d.set_item("income_plankton", self.income_plankton).unwrap();
@@ -1801,6 +1861,13 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: overrides maturity age and the reproduction cost fraction,
+    /// so the life-history changes can be ablated like anything else.
+    fn debug_set_life_history(&mut self, maturity_mult: f32, repro_fraction: f32) {
+        self.maturity_multiplier = maturity_mult;
+        self.repro_capacity_fraction = repro_fraction;
     }
 
     /// Test-only: overrides the grazing half-saturation. 0.0 restores the old

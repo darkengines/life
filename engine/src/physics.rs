@@ -2151,8 +2151,13 @@ pub fn tick(world: &mut World) {
                 let upkeep = crate::PER_PIXEL_METABOLISM
                     * metabolic_part_load(world, slot)
                     * world.individuals.size_scale[slot];
-                world.individuals.energy[slot] -=
-                    world.pathogen_damage_rate * pathogen_pressure * resistance * upkeep;
+                let toll = world.pathogen_damage_rate * pathogen_pressure * resistance * upkeep;
+                let before = world.individuals.energy[slot];
+                world.individuals.energy[slot] -= toll;
+                // Attribute the death to the thing that actually caused it.
+                if before > 0.0 && world.individuals.energy[slot] <= 0.0 {
+                    world.deaths_disease += 1;
+                }
             }
             world.fields.pheromone[idx] += crate::PHEROMONE_EMIT_BASE * world.individuals.pheromone_emission[slot] * world.dt;
             world.fields.territory[idx] += crate::TERRITORY_EMIT_BASE * world.individuals.territoriality[slot] * world.dt;
@@ -2238,8 +2243,25 @@ pub fn tick(world: &mut World) {
                 &world.fields.blood, world.size, world.individuals.root_pos[slot]);
             let safe_ok = local_blood < crate::BREEDING_SAFETY_BLOOD_MAX;
             let offspring_parts = world.individuals.pixel_count[slot] as f32 + 1.0;
-            let repro_cost = crate::REPRODUCE_BASE_COST
-                + world.repro_cost_per_part * offspring_parts;
+            // Breeding costs a real FRACTION of what this animal can hold, not
+            // a small absolute number.
+            //
+            // The old cost was base plus 1.2 per part -- about 26 energy for a
+            // twenty-part animal sitting on hundreds -- so an adult could breed
+            // dozens of times and offspring were nearly free. That is pure
+            // r-selection, and it produced exactly what it should: a mean age
+            // of 580 against an observed maximum of 8198, a population turning
+            // over every 285 ticks, and animals that persist by sheer numbers
+            // rather than by being good at anything. Being competent could not
+            // pay when being numerous was so cheap.
+            //
+            // Pricing it against storage capacity also makes it immune to the
+            // failure that has bitten twice already: an absolute constant goes
+            // inert the moment the energy economy inflates past it.
+            let capacity = storage_capacity(world, slot);
+            let repro_cost = (crate::REPRODUCE_BASE_COST
+                + world.repro_cost_per_part * offspring_parts)
+                .max(capacity * world.repro_capacity_fraction);
             // Must keep a survival buffer after paying, or reproducing would
             // be a reliable way to starve immediately afterwards.
             let repro_threshold = repro_cost + crate::REPRODUCE_ENERGY_BUFFER;
@@ -2257,6 +2279,17 @@ pub fn tick(world: &mut World) {
                 world.individuals.pending_reward[slot] += crate::REWARD_REPRODUCE;
                 world.individuals.ticks_since_reproduced[slot] = 0;
                 let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot, world.growth_tip_weight);
+                // Parental investment: most of what the parent spent goes INTO
+                // the offspring rather than evaporating. A newborn used to
+                // start on a flat 10 units whatever it cost to make, so there
+                // was no way to trade quantity for quality -- every child was
+                // equally underfed and equally likely to die, and the only
+                // strategy available was to make more of them. An endowed
+                // offspring can actually survive its first famine, which is
+                // what makes producing fewer, better-provisioned young a
+                // strategy the world can discover.
+                world.individuals.energy[child] =
+                    (repro_cost * crate::REPRO_ENDOWMENT_SHARE).max(10.0);
                 // Inherited instinct: pull the newborn's decisions part-way
                 // toward what the GPU has learned works, then let evolution
                 // take it from there.
@@ -2459,6 +2492,26 @@ pub fn tick(world: &mut World) {
     for c in world.corpses.iter_mut() {
         if c.root_pos[1] > 0.0 { c.root_pos[1] = (c.root_pos[1] - crate::CORPSE_SINK_RATE).max(0.0); }
     }
+    // Carrion SMELLS. This was missing entirely: a carcass emitted nothing, so
+    // the only way to find one was to collide with it, and a whale fall worth
+    // thousands of units could sink past a starving animal a few body lengths
+    // away without it ever knowing. That is not how any of this works in the
+    // sea -- a whale fall releases an enormous chemical plume and is found by
+    // scavengers from a very long way off, which is exactly why it gathers a
+    // crowd worth competing in.
+    //
+    // Emitted into the existing blood field, because animals already sense its
+    // gradient: the machinery to smell a carcass was already there, nothing was
+    // putting a smell into it. Scent scales with how much carcass is left, so a
+    // fresh whale fall is a beacon and a stripped one barely registers.
+    for i in 0..world.corpses.len() {
+        let (pos, energy) = (world.corpses[i].root_pos, world.corpses[i].energy);
+        if energy <= 0.01 { continue; }
+        let (cx, cy) = grid_xy(world, pos);
+        let idx = (cx * world.size + cy) as usize;
+        let scent = (energy * crate::CARRION_SCENT_PER_ENERGY).min(crate::CARRION_SCENT_MAX);
+        world.fields.blood[idx] += scent * world.dt;
+    }
     world.corpses.retain(|c| c.energy > 0.01);
     timings.push(("corpses", t0.elapsed().as_secs_f64() * 1000.0));
 
@@ -2484,6 +2537,7 @@ pub fn tick(world: &mut World) {
         bloom,
         world.snow_plumes,
         world.production_rows,
+        phase,
     );
     world.fields.step_diffusion(world.size);
     timings.push(("fields", t0.elapsed().as_secs_f64() * 1000.0));

@@ -252,6 +252,7 @@ impl Fields {
         bloom_intensity: f32,
         n_plumes: u32,
         production_rows: f32,
+        phase: f32,
     ) {
         let n = size as usize;
 
@@ -319,6 +320,34 @@ impl Fields {
         let lit_of = |y: usize| 0.25 + 0.75 * ((y - top) as f32 / zone as f32);
         let lit_total: f32 = (top..n).map(lit_of).sum::<f32>().max(1e-6);
         let spread = production_rows / lit_total;
+        // Horizontal structure: where the water is productive, and where it is
+        // not.
+        //
+        // Plumes were dropped at uniformly random x, which over any span of
+        // ticks averages out to an evenly productive ocean -- the randomness
+        // was per-plume rather than in the water itself, so there was nothing
+        // for an animal to find, remember, or return to. Real oceans are
+        // nothing like uniform horizontally: fronts, eddies and upwelling
+        // zones make some stretches richly productive and others close to
+        // desert, and those features persist for a long time and drift.
+        //
+        // Three sinusoids at unrelated wavelengths and drift speeds, wrapped
+        // to the cylinder so the seam is invisible. Because the periods do not
+        // divide one another the pattern never repeats, and because they drift
+        // at different rates the rich stretches move and slowly reorganise --
+        // a productive patch is worth finding and worth following, but not
+        // worth settling on forever.
+        let band = |x: f32| -> f32 {
+            let u = x / n as f32;
+            let a = (std::f32::consts::TAU * (u * 1.0 + phase * 0.00013)).sin();
+            let b = (std::f32::consts::TAU * (u * 2.0 - phase * 0.00021)).sin();
+            let c = (std::f32::consts::TAU * (u * 5.0 + phase * 0.00047)).sin();
+            let raw = 0.5 + 0.5 * (a * 0.5 + b * 0.32 + c * 0.18);
+            // Contrast, so there are genuinely barren stretches rather than a
+            // gentle ripple in an otherwise even ocean.
+            raw.clamp(0.0, 1.0).powf(crate::SNOW_BAND_CONTRAST)
+        };
+
         for _ in 0..n_plumes {
             let cx = rng.random_range(0..n) as f32;
             let width = rng.random_range(size as f32 * 0.02..size as f32 * 0.10);
@@ -329,7 +358,7 @@ impl Fields {
                 // The world is a cylinder, so a plume near one edge spills
                 // round onto the other rather than being cut off.
                 let x = (((cx as i32 + dx) % n as i32) + n as i32) as usize % n;
-                let w = strength * (-(dx * dx) as f32 * inv_two_r2).exp();
+                let w = strength * (-(dx * dx) as f32 * inv_two_r2).exp() * band(x as f32);
                 if w < 1e-4 { continue; }
                 for y in top..n {
                     // Light falls off with depth, so production does too --
