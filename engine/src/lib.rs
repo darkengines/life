@@ -72,11 +72,22 @@ pub const EAT_RATE: f32 = 2.0;
 /// apparatus, can strain from the water each tick. Surface rather than mass,
 /// because that is how filtration actually scales; organs rather than flank,
 /// because that is where real animals do their feeding.
-pub const GRAZE_SURFACE_RATE: f32 = 0.057;
+/// What a unit of swept water yields. This is the dominant term: intake is
+/// mostly about how much water a body moves through, which is what makes a
+/// wide body held across the flow worth building and makes sitting still a
+/// poor living.
+pub const GRAZE_SWEPT_RATE: f32 = 0.030;
+/// Passive absorption through exposed surface. Deliberately small -- it keeps
+/// a drifting animal alive rather than feeding it.
+pub const GRAZE_SURFACE_RATE: f32 = 0.012;
 /// Intake scales as feeding capacity to this power. Below the metabolic
 /// exponent of 0.75 on purpose: that ordering -- intake shallower than upkeep
 /// -- is what gives a finite best size and keeps small bodies viable.
 pub const GRAZE_SURFACE_EXPONENT: f32 = 0.70;
+/// Plankton concentration at which straining runs at half rate. Below it,
+/// intake falls away faster than the food does, so the last of a patch is
+/// never harvested -- the refuge that lets depleted water recover.
+pub const GRAZE_HALF_SATURATION: f32 = 0.05;
 /// Dedicated feeding apparatus is worth several times plain flank, which is
 /// the reason to grow any.
 pub const GRAZE_ORGAN_RATE: f32 = 0.17;
@@ -580,7 +591,11 @@ pub const PATHOGEN_PRESSURE_MAX: f32 = 2.5;
 // 2.0 -> 2.9); 0.035 buys far more (effective 10.5) but costs a third to
 // two thirds of the population, which is too steep. This is a genuine
 // diversity-vs-population trade-off, not a single correct value.
-pub const PATHOGEN_DAMAGE_RATE: f32 = 0.02;
+// Now a MULTIPLE of the host's own upkeep, not an absolute energy drain, so
+// it cannot be outgrown by an inflating energy economy. At full pressure a
+// dominant lineage pays several times its own metabolism, which is what makes
+// being common genuinely costly.
+pub const PATHOGEN_DAMAGE_RATE: f32 = 6.0;
 pub const DISEASE_RESISTANCE_METABOLIC_COST: f32 = 0.012;
 
 // Experience logging (see ExperienceRow). Stride 200 means, on average,
@@ -968,6 +983,10 @@ pub struct World {
     /// 0% of deaths while the world looked crowded, and there is no way to
     /// tell a threshold that is set too high from a mechanism that is broken
     /// without being able to see the number it is thresholding.
+    /// Mean plankton concentration, published so resource depletion is
+    /// visible: a crash caused by stripping the water bare looks identical
+    /// from the outside to one caused by anything else.
+    pub mean_food: f32,
     pub mean_pressure: f32,
     pub max_pressure: f32,
 
@@ -1026,6 +1045,7 @@ pub struct World {
     /// be swept TOGETHER rather than hand-tuned one at a time against a moving
     /// target -- which is how the last several settings were chosen, and none
     /// of them worked.
+    pub graze_half_saturation: f32,
     pub plankton_calories: f32,
     pub production_rows: f32,
     pub snow_strength: f32,
@@ -1127,6 +1147,7 @@ impl World {
             income_plankton: 0.0,
             income_predation: 0.0,
             income_scavenge: 0.0,
+            mean_food: 0.0,
             mean_pressure: 0.0,
             max_pressure: 0.0,
             food_regrow_rate,
@@ -1145,6 +1166,7 @@ impl World {
             brain_noise: 0.0,
             space_pressure_tolerance: SPACE_PRESSURE_TOLERANCE,
             space_pressure_mortality: SPACE_PRESSURE_MORTALITY,
+            graze_half_saturation: GRAZE_HALF_SATURATION,
             plankton_calories: PLANKTON_CALORIES,
             production_rows: SNOW_PRODUCTION_ROWS,
             snow_strength: SNOW_BLOOM_STRENGTH,
@@ -1423,6 +1445,7 @@ impl World {
         d.set_item("income_plankton", self.income_plankton).unwrap();
         d.set_item("income_predation", self.income_predation).unwrap();
         d.set_item("income_scavenge", self.income_scavenge).unwrap();
+        d.set_item("mean_food", self.mean_food).unwrap();
         d.set_item("mean_pressure", self.mean_pressure).unwrap();
         d.set_item("max_pressure", self.max_pressure).unwrap();
         d
@@ -1778,6 +1801,12 @@ impl World {
         let f = &self.fields.food;
         if f.is_empty() { return 0.0; }
         f.iter().sum::<f32>() / f.len() as f32
+    }
+
+    /// Test-only: overrides the grazing half-saturation. 0.0 restores the old
+    /// take-everything grazing, so a sweep over this carries its own control.
+    fn debug_set_graze_half_saturation(&mut self, v: f32) {
+        self.graze_half_saturation = v;
     }
 
     /// Test-only: sets calories per unit of plankton and total production.

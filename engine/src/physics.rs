@@ -1878,11 +1878,6 @@ pub fn tick(world: &mut World) {
             // restores the ordering for every body shape rather than only for
             // compact ones, and it makes small animals viable again -- which
             // is a precondition for any size structure at all.
-            let raw = surface * crate::GRAZE_SURFACE_RATE
-                + feeding_organs * crate::GRAZE_ORGAN_RATE;
-            let intake_capacity = raw.max(0.0).powf(crate::GRAZE_SURFACE_EXPONENT);
-            let n_cells = world.individuals.pixel_count[slot].max(1) as f32;
-            let per_part = intake_capacity / n_cells;
             let owned_g;
             let graze_pos: &[[f32; 2]] = match &pos_cache[slot] {
                 Some(v) if v.len() == world.individuals.pixel_count[slot] as usize => v,
@@ -1891,6 +1886,52 @@ pub fn tick(world: &mut World) {
                     &owned_g
                 }
             };
+            // SWEPT VOLUME, not surface area.
+            //
+            // Exposed surface turned out to apply no pressure on shape at all,
+            // and the reason is worth keeping. These bodies are trees on a
+            // lattice with only one or two children per node, so almost every
+            // component has two or three of its four sides open no matter how
+            // the animal is arranged: a chain of twenty and a bush of twenty
+            // have nearly the same exposed surface. The measure could not tell
+            // them apart, so morphology stayed arbitrary and elongation fell
+            // back to 0.4.
+            //
+            // What a filter feeder actually collects is the water it passes
+            // THROUGH, and that is frontal width times distance travelled --
+            // the span of the body perpendicular to its motion, times its
+            // speed. This does distinguish shapes, and it distinguishes them
+            // the way the real animals are distinguished: a wide fan held
+            // across the flow gathers, a compact lump does not, and neither
+            // gathers anything at all sitting still. It is also why real
+            // suspension feeders are built as combs, nets, fans and crowns
+            // rather than as balls.
+            let vx = vel[0];
+            let vy = vel[1];
+            let speed = (vx * vx + vy * vy).sqrt();
+            let mut swept = 0.0f32;
+            if speed > 1e-4 && graze_pos.len() > 1 {
+                // Unit vector perpendicular to travel.
+                let (px, py) = (-vy / speed, vx / speed);
+                let mut lo = f32::MAX;
+                let mut hi = f32::MIN;
+                for q in graze_pos.iter() {
+                    let proj = q[0] * px + q[1] * py;
+                    if proj < lo { lo = proj; }
+                    if proj > hi { hi = proj; }
+                }
+                let frontal = (hi - lo).max(0.0);
+                swept = frontal * speed.min(crate::MAX_SPEED);
+            }
+            // A body still absorbs a little through its own surface even when
+            // stationary, so drifting is a meagre living rather than instant
+            // death -- but only a meagre one.
+            let raw = swept * crate::GRAZE_SWEPT_RATE
+                + surface * crate::GRAZE_SURFACE_RATE
+                + feeding_organs * crate::GRAZE_ORGAN_RATE;
+            let intake_capacity = raw.max(0.0).powf(crate::GRAZE_SURFACE_EXPONENT);
+            let n_cells = world.individuals.pixel_count[slot].max(1) as f32;
+            let per_part = intake_capacity / n_cells;
             let mut cells: Vec<usize> = graze_pos
                 .iter()
                 .map(|p| {
@@ -1903,9 +1944,34 @@ pub fn tick(world: &mut World) {
             cells.sort_unstable();
             cells.dedup();
             for c in cells {
-                let take = world.fields.food[c].min(per_part);
-                if take <= 0.0 { continue; }
-                world.fields.food[c] -= take;
+                let here = world.fields.food[c];
+                if here <= 0.0 { continue; }
+                // Saturating intake (a Holling type II functional response on
+                // concentration). Two things follow from it, and the second is
+                // the one that matters.
+                //
+                // First, diminishing returns: rich water is not proportionally
+                // better than adequate water, because there is a limit to how
+                // fast a body can process what it strains.
+                //
+                // Second, and the reason this is here: it leaves the resource
+                // a REFUGE. Grazing used to take the cell down to zero, so a
+                // population boom stripped the water bare and then starved in
+                // it -- which is precisely the boom-bust the world has been
+                // oscillating through, between roughly twenty animals and
+                // five hundred. A filter feeder genuinely cannot do this:
+                // below some concentration, straining water costs more than
+                // the food in it is worth, so the last of a resource is never
+                // harvested. That unharvestable remainder is what lets a
+                // depleted patch recover, and it is the classic stabiliser for
+                // consumer-resource cycles.
+                let take = if world.graze_half_saturation <= 0.0 {
+                    here.min(per_part)
+                } else {
+                    per_part * here / (here + world.graze_half_saturation)
+                };
+                if take <= 1e-6 { continue; }
+                world.fields.food[c] = here - take;
                 eaten += take;
             }
             let gain = eaten * world.plankton_calories * graze_efficiency
@@ -2068,7 +2134,25 @@ pub fn tick(world: &mut World) {
             // lineage or caps anyone's population directly.
             if pathogen_pressure > 0.01 {
                 let resistance = 1.0 / (1.0 + world.individuals.disease_resistance[slot]);
-                world.individuals.energy[slot] -= world.pathogen_damage_rate * pathogen_pressure * resistance;
+                // Charged as a multiple of the host's OWN upkeep rather than
+                // as a flat energy drain.
+                //
+                // A fixed rate silently stops mattering whenever the energy
+                // economy inflates: 0.02 per tick was a real burden when
+                // animals lived on twenty or a hundred units, and is nothing at
+                // all to a body banking two thousand. Measured, the world had
+                // collapsed to an effective 1.68 lineages with one at 75% while
+                // this mechanism was nominally running -- it was simply too
+                // small to notice. Scaling it to the host's metabolism means a
+                // disease costs the same FRACTION of a living regardless of how
+                // rich the world becomes, which is both how disease actually
+                // burdens an organism and the only version of this that cannot
+                // quietly become decorative again.
+                let upkeep = crate::PER_PIXEL_METABOLISM
+                    * metabolic_part_load(world, slot)
+                    * world.individuals.size_scale[slot];
+                world.individuals.energy[slot] -=
+                    world.pathogen_damage_rate * pathogen_pressure * resistance * upkeep;
             }
             world.fields.pheromone[idx] += crate::PHEROMONE_EMIT_BASE * world.individuals.pheromone_emission[slot] * world.dt;
             world.fields.territory[idx] += crate::TERRITORY_EMIT_BASE * world.individuals.territoriality[slot] * world.dt;
@@ -2261,6 +2345,11 @@ pub fn tick(world: &mut World) {
         }
     }
 
+    world.mean_food = if world.fields.food.is_empty() {
+        0.0
+    } else {
+        world.fields.food.iter().sum::<f32>() / world.fields.food.len() as f32
+    };
     world.mean_pressure = if pressure_n > 0.0 { pressure_sum / pressure_n } else { 0.0 };
     world.max_pressure = pressure_max;
     timings.push(("decide_apply", t0.elapsed().as_secs_f64() * 1000.0));

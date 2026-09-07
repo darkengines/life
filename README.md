@@ -451,6 +451,43 @@ wrong knob, and 0.36/6 -- the setting the live world was actually running -- was
 point in the grid. Shipped at 0.80/6: the least total food among the viable settings, and the only
 one with a genuinely balanced food web at 46% starvation against 49% predation.
 
+**Exposed surface applied no pressure on shape, and the reason is a lattice artefact.**
+Charging intake on exposed surface was supposed to make morphology matter -- a compact blob has a
+perimeter of sqrt(N), a branched body nearly N. It did not work, and elongation fell back to 0.40.
+These bodies are *trees on a lattice* with only one or two children per node, so almost every
+component has two or three of its four sides open no matter how the animal is arranged: a chain of
+twenty and a bush of twenty have nearly the same exposed surface. The measure could not tell them
+apart.
+
+Replaced with **swept volume** -- frontal width perpendicular to travel, times speed. That is what a
+suspension feeder actually collects, it does distinguish shapes, and it distinguishes them the way
+real animals are distinguished: a wide fan held across the flow gathers, a compact lump does not,
+and neither gathers anything sitting still. It is also the reason real suspension feeders are built
+as combs, nets, fans and crowns rather than as balls.
+
+**A diversity mechanism can stop working without ever failing.** The world collapsed to an
+effective **1.68 lineages**, one at 75%, while negative frequency-dependent selection was nominally
+running. It had not broken -- it had been *outgrown*. The pathogen drained a flat 0.02 energy per
+tick, which was a real burden when animals lived on twenty or a hundred units and is nothing at all
+to a body banking two thousand. Disease is now charged as a multiple of the host's own upkeep, so
+it costs the same fraction of a living however rich the world becomes. That is both how disease
+actually burdens an organism and the only version of it that cannot silently become decorative
+again.
+
+The same failure mode is worth naming generally, because it has now happened twice in this project:
+**a constant tuned against one energy scale becomes inert when the scale moves.** The crowding
+tolerance of 1.5 against a measured pressure of 18 was the same mistake. Anything that thresholds
+against a quantity the economy can inflate should be expressed as a fraction of that quantity, not
+as an absolute.
+
+**Boom-bust, measured.** Grazing took each cell's plankton to zero, so a population boom stripped
+the water bare and starved in it. Measured over 30000 ticks on three seeds, the population swung
+**16.5x** between peak and trough. Real filter feeders cannot do this: below some concentration,
+straining water costs more than the food in it is worth, so the last of a resource is never
+harvested. Intake now saturates with concentration (a Holling type II response), which leaves that
+unharvestable remainder -- the refuge that lets a depleted patch recover, and the classic stabiliser
+for consumer-resource cycles.
+
 ---
 
 ## 8. Roadmap / wishlist
