@@ -483,10 +483,21 @@ pub const CROWDING_ENERGY_COST: f32 = 0.012;
 /// pressing on this one. Contact itself is too strict a test for "crowded" --
 /// animals packed shoulder to shoulder are crowded before they interpenetrate.
 pub const SPACE_PRESSURE_RANGE: f32 = 2.0;
-pub const SPACE_PRESSURE_TOLERANCE: f32 = 1.5;
-pub const SPACE_PRESSURE_ENERGY_COST: f32 = 0.05;
-pub const SPACE_PRESSURE_MORTALITY: f32 = 0.0009;
-pub const SPACE_PRESSURE_MORTALITY_MAX: f32 = 0.02;
+// Calibrated against the measured distribution, which was only observable once
+// pressure was published: mean 18.3, peak 56.5. The old tolerance of 1.5 was
+// set blind and was meaningless on that scale -- every animal alive was twelve
+// times over it, so had the regulator been connected it would have killed the
+// entire world rather than the crowded part of it. Tolerance now sits just
+// above the typical animal, so ordinary life is free and only genuine crush is
+// punished, and the quadratic coefficients are scaled to that range instead of
+// to a number picked out of the air.
+// Set just BELOW where the population actually sits (measured mean 17.8), so
+// ordinary density costs a little and genuine crush is punished hard, rather
+// than above it where almost nothing ever qualified.
+pub const SPACE_PRESSURE_TOLERANCE: f32 = 12.0;
+pub const SPACE_PRESSURE_ENERGY_COST: f32 = 0.0004;
+pub const SPACE_PRESSURE_MORTALITY: f32 = 0.000012;
+pub const SPACE_PRESSURE_MORTALITY_MAX: f32 = 0.012;
 pub const CROWDING_SIZE_FACTOR: f32 = 0.02;
 // Trespassing on ground someone else has marked. This is what turns territory
 // marking from a decorative field into a defended range worth holding.
@@ -624,6 +635,12 @@ pub const ROCK_ENABLED: bool = false;
 // single line of water strictly best and pinned the whole population to the
 // ceiling; a real lit zone is a broad band with production tapering through it.
 pub const SNOW_SOURCE_DEPTH: usize = 90;
+/// Total plankton production per plume-column, expressed as an equivalent
+/// number of fully-lit rows. This is the ONLY knob that sets how much food the
+/// ocean makes; SNOW_SOURCE_DEPTH only decides how it is spread through the
+/// water. Keeping them separate is deliberate -- conflating them once turned a
+/// change meant to spread the population out into a ninefold food increase.
+pub const SNOW_PRODUCTION_ROWS: f32 = 6.0;
 pub const SNOW_SINK_RATE: f32 = 0.22;
 pub const SNOW_FLOOR_DEPTH: usize = 14;
 pub const SNOW_FLOOR_DECAY: f32 = 0.06;
@@ -661,6 +678,20 @@ pub const SNOW_BLOOM_STRENGTH: f32 = 0.85;
 // A rare, enormous carcass sinking from above. A different KIND of resource
 // from marine snow: snow rewards steady filtering along the drift, a carcass
 // rewards noticing one, reaching it fast, and holding it against competitors.
+// --- Leviathan -------------------------------------------------------------
+// Every so often something very large arrives and hunts.
+//
+// It is not a script and not a special case: it is an ordinary individual,
+// seeded big and well-armed, living and dying by exactly the same rules as
+// everything else -- it can starve, it can be swarmed, and its offspring are
+// ordinary animals. What it provides is a transient apex, which real oceans
+// have and this one did not: a source of mortality that a crowded population
+// cannot simply out-breed, and a reason for prey traits to be worth anything.
+// A world where the only way to die is starving is a world where nothing needs
+// to be good at anything else.
+pub const LEVIATHAN_CHANCE: f32 = 0.0006;
+pub const LEVIATHAN_PARTS: u32 = 34;
+pub const LEVIATHAN_SCALE: f32 = 2.4;
 pub const WHALE_FALL_CHANCE: f32 = 0.0012;
 pub const WHALE_FALL_MIN_PARTS: u32 = 45;
 pub const WHALE_FALL_MAX_PARTS: u32 = 130;
@@ -875,6 +906,14 @@ pub struct World {
     /// adding noise to the other causes.
     pub deaths_crowding: u64,
     pub whale_falls: u64,
+    pub leviathans: u64,
+    /// Mean and peak space pressure over the living population last tick.
+    /// Published so the density regulator is OBSERVABLE: it was contributing
+    /// 0% of deaths while the world looked crowded, and there is no way to
+    /// tell a threshold that is set too high from a mechanism that is broken
+    /// without being able to see the number it is thresholding.
+    pub mean_pressure: f32,
+    pub max_pressure: f32,
 
     pub timings: Vec<(&'static str, f64)>, // (phase, milliseconds) for the most recent tick -- diagnostic only
 
@@ -1022,6 +1061,9 @@ impl World {
             deaths_popcap: 0,
             deaths_crowding: 0,
             whale_falls: 0,
+            leviathans: 0,
+            mean_pressure: 0.0,
+            max_pressure: 0.0,
             food_regrow_rate,
             food_cap,
             timings: Vec::new(),
@@ -1310,6 +1352,9 @@ impl World {
         d.set_item("culled", self.deaths_popcap).unwrap();
         d.set_item("crowded", self.deaths_crowding).unwrap();
         d.set_item("whale_falls", self.whale_falls).unwrap();
+        d.set_item("leviathans", self.leviathans).unwrap();
+        d.set_item("mean_pressure", self.mean_pressure).unwrap();
+        d.set_item("max_pressure", self.max_pressure).unwrap();
         d
     }
     fn weather_name(&self) -> Option<&'static str> {

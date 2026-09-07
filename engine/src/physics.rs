@@ -1501,6 +1501,9 @@ pub fn tick(world: &mut World) {
     let t0 = std::time::Instant::now();
     let mut t_reproduce = 0.0f64;
     let mut t_collision = 0.0f64;
+    let mut pressure_sum = 0.0f32;
+    let mut pressure_n = 0.0f32;
+    let mut pressure_max = 0.0f32;
     for (i, &slot) in deciding.iter().enumerate() {
         world.individuals.age[slot] += 1;
         let is_captured = attached_targets.contains(&slot);
@@ -1514,6 +1517,9 @@ pub fn tick(world: &mut World) {
         world.individuals.pending_reward[slot] = 0.0;
         let (d, thrust, contact, _, crowding, torque, com, moment, separation, pressure) = &pre[i];
         let pressure = *pressure;
+        pressure_sum += pressure;
+        pressure_n += 1.0;
+        if pressure > pressure_max { pressure_max = pressure; }
         let crowding = *crowding;
         let torque = *torque;
         let (com, moment) = (*com, *moment);
@@ -1903,14 +1909,24 @@ pub fn tick(world: &mut World) {
             // morphological innovation for a reason that says nothing about
             // whether the new shape is any good -- which is how morphology
             // converges early on whatever was safe and stops exploring.
+            //
+            // Named `selection_relief`, NOT `pressure`: there is already a
+            // `pressure` in this scope holding the animal's space pressure,
+            // and calling this one the same thing shadowed it. The crowding
+            // block below then computed its threshold against 1.0 instead of
+            // against a measured pressure of 18, so `over` was always zero and
+            // the entire density regulator was silently switched off -- while
+            // still reporting its deaths as 0% and looking, from outside, like
+            // a mechanism that simply did not work.
             let protect = world.individuals.innovation_protect[slot];
-            let pressure = if protect > 0 {
+            let selection_relief = if protect > 0 {
                 world.individuals.innovation_protect[slot] = protect - 1;
                 crate::INNOVATION_PROTECT_METABOLISM
             } else {
                 1.0
             };
-            world.individuals.energy[slot] -= metabolism * world.metabolism_multiplier * pressure;
+            world.individuals.energy[slot] -=
+                metabolism * world.metabolism_multiplier * selection_relief;
 
             // Energy is now BOUNDED by what the body can actually hold.
             // Before this an animal simply accumulated without limit -- one
@@ -1985,7 +2001,7 @@ pub fn tick(world: &mut World) {
                 let mass = body_size_sum(world, slot) * world.individuals.size_scale[slot];
                 world.individuals.energy[slot] -=
                     crate::SPACE_PRESSURE_ENERGY_COST * over * over * (1.0 + mass * crate::CROWDING_SIZE_FACTOR);
-                let risk = (world.space_pressure_mortality * over * over * pressure)
+                let risk = (world.space_pressure_mortality * over * over * selection_relief)
                     .min(crate::SPACE_PRESSURE_MORTALITY_MAX);
                 if risk > 0.0 && world.rng.random::<f32>() < risk {
                     kill(world, slot);
@@ -2215,6 +2231,8 @@ pub fn tick(world: &mut World) {
         }
     }
 
+    world.mean_pressure = if pressure_n > 0.0 { pressure_sum / pressure_n } else { 0.0 };
+    world.max_pressure = pressure_max;
     timings.push(("decide_apply", t0.elapsed().as_secs_f64() * 1000.0));
     timings.push(("  of_which_reproduce", t_reproduce));
     timings.push(("  of_which_collision", t_collision));
@@ -2234,6 +2252,39 @@ pub fn tick(world: &mut World) {
         }
     }
     timings.push(("pop_cap", t0.elapsed().as_secs_f64() * 1000.0));
+
+    // A leviathan arrives. See LEVIATHAN_CHANCE: an ordinary individual seeded
+    // large and well-armed, subject to every rule the rest of the world obeys.
+    // It exists because a population whose only cause of death is starvation
+    // has nothing to be good at except eating, and cannot be thinned by
+    // anything it is able to out-breed.
+    if world.rng.random::<f32>() < crate::LEVIATHAN_CHANCE {
+        let n = world.size as f32;
+        let pos = [
+            world.rng.random_range(0.0..n),
+            world.rng.random_range(n * 0.15..n * 0.85),
+        ];
+        let colour = [235u8, 90u8, 70u8];
+        let slot = crate::individuals::spawn_founder(
+            &mut world.individuals, &mut world.pixels, &mut world.rng, pos, colour);
+        for _ in 0..crate::LEVIATHAN_PARTS {
+            crate::individuals::grow_one_pixel(
+                &mut world.individuals, &mut world.pixels, &mut world.rng, slot);
+        }
+        // Give it the anatomy of a hunter rather than hoping mutation supplies
+        // one: jaws at the front, and the bulk to drive them.
+        let off = world.individuals.pixel_offset[slot] as usize;
+        let cnt = world.individuals.pixel_count[slot] as usize;
+        for k in 0..cnt.min(6) {
+            world.pixels.part_type[off + k] = crate::pixels::PART_MOUTH;
+        }
+        crate::individuals::recompute_part_counts(&mut world.individuals, &world.pixels, slot);
+        world.individuals.size_scale[slot] = crate::LEVIATHAN_SCALE;
+        world.individuals.birth_size[slot] = world.individuals.pixel_count[slot];
+        world.individuals.bite_force[slot] = world.individuals.bite_force[slot].max(2.5);
+        world.individuals.energy[slot] = 400.0;
+        world.leviathans += 1;
+    }
 
     let t0 = std::time::Instant::now();
     // Whale fall. Every so often something very large dies somewhere above and

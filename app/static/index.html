@@ -65,7 +65,6 @@
   /* Specimen brain inspector. Activations are signed, so every bar reads out
      from a centre line: which way a channel is pushing matters as much as how
      hard, and a left-anchored bar hides that. */
-  --pos-def: #6fe3a8; --neg-def: #ff8ba0;
   #brain { --pos: #6fe3a8; --neg: #ff8ba0; font-size: 11px; max-height: 460px; overflow-y: auto; }
   .brain-id { color: #7f8ea3; font-size: 11px; letter-spacing: 0; }
   .bmeta { color: #9fb0c4; margin-bottom: 4px; }
@@ -592,17 +591,22 @@ function renderBrain(b) {
   const anatomyStr = Object.keys(anatomy).sort((x, y) => anatomy[y] - anatomy[x])
     .map(k => `${PART_LABELS[k] || k}×${anatomy[k]}`).join(' · ');
 
-  // Senses are many; showing all forty at once is unreadable, so the strongest
-  // are listed first and the rest stay available underneath.
+  // Senses in their FIXED order, always the same rows in the same places.
+  //
+  // These used to be sorted by magnitude and cut to the top ten, which was a
+  // mistake in two ways at once: selecting the largest values guarantees that
+  // every bar shown is near its limit, and re-sorting every refresh means the
+  // rows swap around underneath each other so nothing can be watched changing.
+  // A fixed layout is what makes an activation display readable -- the eye
+  // learns where a channel lives and then sees it move.
   const senses = b.sense.map((v, i) => ({ v, label: b.sense_labels[i] || ('s' + i) }));
-  const strong = senses.slice().sort((p, q) => Math.abs(q.v) - Math.abs(p.v)).slice(0, 10);
 
   brainEl.innerHTML = `
     <div class="bmeta">${b.part_type.length} parts &middot; energy ${b.energy.toFixed(0)} &middot; age ${b.age}
       &middot; speed ${Math.hypot(b.velocity[0], b.velocity[1]).toFixed(2)}</div>
     <div class="bmeta banat">${anatomyStr}</div>
-    <div class="bsec">strongest senses</div>
-    ${strong.map(s => bar(s.v, s.label)).join('')}
+    <div class="bsec">senses (${senses.length})</div>
+    ${senses.map(s => bar(s.v, s.label)).join('')}
     <div class="bsec">perception latent (shared encoder, ${b.latent.length}d)</div>
     <div class="bstrip">${b.latent.map(v => `<span class="bcell" style="background:${v >= 0 ? 'var(--pos)' : 'var(--neg)'};opacity:${Math.min(1, Math.abs(v)) * 0.85 + 0.15}" title="${v.toFixed(3)}"></span>`).join('')}</div>
     <div class="bsec">body network (one unit per component, pooled)</div>

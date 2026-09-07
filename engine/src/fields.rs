@@ -302,8 +302,22 @@ impl Fields {
         // A real photic zone is tens of metres deep with production falling
         // off gradually through it. A gradient gives a reason to be at many
         // depths; a cliff gives one reason to be at exactly one.
-        let zone = crate::SNOW_SOURCE_DEPTH.min(n);
+        let zone = crate::SNOW_SOURCE_DEPTH.min(n).max(1);
         let top = n.saturating_sub(zone);
+        // Total production is a property of the OCEAN; the photic zone decides
+        // how that production is DISTRIBUTED through the column, not how much
+        // of it there is. Normalising by the zone's total light keeps those two
+        // things separate.
+        //
+        // Getting this wrong is exactly what happened: widening the zone from
+        // six rows to ninety, to stop everything crowding the surface, silently
+        // multiplied total plankton by about nine, because every row in the
+        // zone received a full dose. The world then looked MORE crowded after a
+        // change meant to decongest it -- not a paradox, just an ocean that had
+        // quietly become nine times richer.
+        let lit_of = |y: usize| 0.25 + 0.75 * ((y - top) as f32 / zone as f32);
+        let lit_total: f32 = (top..n).map(lit_of).sum::<f32>().max(1e-6);
+        let spread = crate::SNOW_PRODUCTION_ROWS / lit_total;
         for _ in 0..n_plumes {
             let cx = rng.random_range(0..n) as f32;
             let width = rng.random_range(size as f32 * 0.02..size as f32 * 0.10);
@@ -318,11 +332,11 @@ impl Fields {
                 if w < 1e-4 { continue; }
                 for y in top..n {
                     // Light falls off with depth, so production does too --
-                    // richest near the surface, tapering to nothing at the
-                    // bottom of the zone, rather than a uniform slab.
-                    let depth_frac = (y - top) as f32 / zone.max(1) as f32;
-                    let lit = 0.25 + 0.75 * depth_frac;
-                    self.food[x * n + y] = (self.food[x * n + y] + w * lit).min(cap);
+                    // richest near the surface, tapering away with depth,
+                    // rather than a uniform slab. Normalised so the column's
+                    // TOTAL output does not depend on how deep the zone is.
+                    self.food[x * n + y] =
+                        (self.food[x * n + y] + w * lit_of(y) * spread).min(cap);
                 }
             }
         }
