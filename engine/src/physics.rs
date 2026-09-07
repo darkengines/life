@@ -2271,6 +2271,27 @@ pub fn tick(world: &mut World) {
     scavenge_all(world, &deciding);
     timings.push(("scavenge", t0.elapsed().as_secs_f64() * 1000.0));
 
+    // Enforce the larder ONCE, at the end of the tick, over every income path.
+    //
+    // The cap was applied in the metabolism block, which runs before predation,
+    // the capture bonus and scavenging all add their energy -- so three of the
+    // four ways of feeding bypassed it completely. An animal whose storage
+    // could hold about 135 was observed sitting on 1862, which is not a
+    // reserve, it is immunity, and it is what turns a good year into a
+    // population explosion: a body that can bank twelve times its own capacity
+    // converts a windfall straight into a burst of offspring, and the crash
+    // follows. Capping every path is what makes storage a real constraint
+    // rather than a suggestion that only grazers happen to obey.
+    let t0 = std::time::Instant::now();
+    for &slot in &alive_slots {
+        if !world.individuals.alive[slot] { continue; }
+        let cap = storage_capacity(world, slot);
+        if world.individuals.energy[slot] > cap {
+            world.individuals.energy[slot] = cap;
+        }
+    }
+    timings.push(("storage_cap", t0.elapsed().as_secs_f64() * 1000.0));
+
     let t0 = std::time::Instant::now();
     let alive_count = (0..world.individuals.len()).filter(|&s| world.individuals.alive[s]).count();
     if alive_count > world.pop_cap {
