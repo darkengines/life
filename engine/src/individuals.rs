@@ -839,6 +839,62 @@ pub fn distill_policy(
 /// Removes one LEAF part (a part with no children), keeping the body a
 /// connected tree. Used by birth anomalies so lineages can shed structure as
 /// well as gain it.
+/// Two components fuse into one.
+///
+/// Growth could only ever ADD parts, so a big organ had to be built out of many
+/// small ones sitting next to each other -- there was no way to arrive at a
+/// single large belly, a single wide jaw, or a claw, only at a cluster of
+/// average-sized pieces that happened to share a type. Real development does
+/// the other thing constantly: tissue fuses, plates coalesce, paired
+/// primordia join on the midline. Fusion is how anything gets a big single
+/// structure rather than a heap of small ones.
+///
+/// Restricted to a LEAF merging into its parent, and deliberately so: fusing a
+/// mid-body component would orphan everything beyond it and have to re-parent
+/// them, which shifts every descendant one cell inward and can drop two parts
+/// onto the same lattice square. A leaf simply disappears into what it was
+/// attached to, and nothing else about the body moves.
+///
+/// The survivor takes the type of whichever contributed more substance, so a
+/// mouth absorbing plain flank becomes a bigger mouth, while flank absorbing a
+/// small mouth stays flank. Merged parts may exceed the ordinary per-part size
+/// ceiling -- that is the entire point, since otherwise fusion buys nothing.
+pub fn merge_leaf_into_parent(
+    individuals: &mut Individuals,
+    pixels: &mut PixelArena,
+    slot: usize,
+    victim: u32,
+) {
+    let offset = individuals.pixel_offset[slot];
+    let count = individuals.pixel_count[slot];
+    if count <= 2 || victim == 0 || victim >= count {
+        return;
+    }
+    let parent = pixels.parent_idx[(offset + victim) as usize];
+    if parent < 0 {
+        return;
+    }
+    let (vi, pi) = ((offset + victim) as usize, (offset + parent as u32) as usize);
+    let v_size = pixels.size[vi];
+    let p_size = pixels.size[pi];
+    // Substance is conserved-ish: some is lost in the joining, as it is in any
+    // real fusion, so merging is not a free way to manufacture size.
+    pixels.size[pi] = (p_size + v_size * crate::MERGE_SIZE_TRANSFER)
+        .min(crate::MERGED_PART_SIZE_MAX);
+    if v_size > p_size {
+        pixels.part_type[pi] = pixels.part_type[vi];
+        pixels.neurite[pi] = pixels.neurite[vi];
+        pixels.phase_offset[pi] = pixels.phase_offset[vi];
+        pixels.freq_mult[pi] = pixels.freq_mult[vi];
+    }
+    // Storage and flex blend by how much each side brought.
+    let total = (p_size + v_size).max(1e-4);
+    pixels.storage[pi] = (pixels.storage[pi] * p_size + pixels.storage[vi] * v_size) / total;
+    pixels.flex[pi] = (pixels.flex[pi] * p_size + pixels.flex[vi] * v_size) / total;
+    pixels.health[pi] = crate::BASE_PIXEL_HEALTH * pixels.size[pi];
+    remove_leaf(individuals, pixels, slot, victim);
+}
+
 pub fn remove_leaf(individuals: &mut Individuals, pixels: &mut PixelArena, slot: usize, victim: u32) {
     let offset = individuals.pixel_offset[slot];
     let count = individuals.pixel_count[slot];
@@ -1334,6 +1390,18 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
     // Birth anomalies: the body plan can gain a part, gain a small burst of
     // them, or LOSE one. Only ever appending meant morphology crept outward in
     // unit steps and could never simplify, so shapes could not really explore.
+    // Fusion: two components join into one larger one. Checked before the
+    // other anomalies because it is the only one that makes a body SIMPLER
+    // while making its parts BIGGER -- every other path either adds pieces or
+    // sheds them, and neither of those can produce a single large organ.
+    // Fusion is an INDEPENDENT event, not an alternative to growing.
+    //
+    // Chaining it onto the grow/shed choice meant a birth that fused could not
+    // also grow, so every fusion was a net loss of one component and mean body
+    // size fell from the forties to thirteen within a few thousand ticks.
+    // Fusing and growing are different processes and a real developing body
+    // does both in the same generation.
+    let will_merge = rng.random::<f32>() < crate::ANOMALY_MERGE_CHANCE;
     if rng.random::<f32>() < crate::ANOMALY_LOSE_PART_CHANCE
         && individuals.pixel_count[child] > 2
     {
@@ -1373,6 +1441,23 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
         } else {
             0
         };
+    // Fusion, applied after growth so the two are independent.
+    if will_merge && individuals.pixel_count[child] > 3 {
+        let off = individuals.pixel_offset[child] as usize;
+        let n = individuals.pixel_count[child] as usize;
+        let mut has_child = vec![false; n];
+        for k in 0..n {
+            let par = pixels.parent_idx[off + k];
+            if par >= 0 {
+                has_child[par as usize] = true;
+            }
+        }
+        let leaves: Vec<usize> = (1..n).filter(|&k| !has_child[k]).collect();
+        if !leaves.is_empty() {
+            let victim = leaves[rng.random_range(0..leaves.len())];
+            merge_leaf_into_parent(individuals, pixels, child, victim as u32);
+        }
+    }
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to
     individuals.ticks_since_fed[child] = 0;

@@ -78,6 +78,18 @@ pub const MATE_CHOICE_ENERGY_RATIO: f32 = 0.8;
 // adds and removes structure, and sometimes in more than unit steps. A lineage
 // that can shed a useless limb, or gain a small cluster at once, explores a
 // far wider space of shapes.
+/// Two components fusing into one. Growth could only ever ADD parts, so a big
+/// organ had to be assembled from many small ones; fusion is how anything ends
+/// up with a single large belly, a wide jaw or a claw rather than a cluster of
+/// average pieces.
+pub const ANOMALY_MERGE_CHANCE: f32 = 0.16;
+/// How much of the absorbed component's substance survives the joining. Below
+/// one, so fusing is a way to CONCENTRATE size, not to manufacture it.
+pub const MERGE_SIZE_TRANSFER: f32 = 0.75;
+/// Merged components may exceed the ordinary per-part ceiling. Without this
+/// fusion would buy nothing at all -- the point is a structure larger than
+/// anything a single growth step can produce.
+pub const MERGED_PART_SIZE_MAX: f32 = 4.5;
 pub const ANOMALY_LOSE_PART_CHANCE: f32 = 0.10;
 pub const ANOMALY_BURST_CHANCE: f32 = 0.12;
 pub const ANOMALY_BURST_MAX: u32 = 3;
@@ -734,6 +746,10 @@ pub const CARRION_SCENT_MAX: f32 = 4.0;
 /// Carrion rots. Without this a carcass nobody ate persisted forever, and they
 /// accumulated into thousands of bodies and tens of thousands of draw calls.
 pub const CORPSE_DECAY_RATE: f32 = 0.0016;
+/// Carcass energy at which decay runs at the nominal rate. Bigger bodies rot
+/// more slowly, by the inverse root of their mass, so a whale fall persists as
+/// a place worth travelling to instead of evaporating like a minnow.
+pub const CORPSE_DECAY_MASS_REF: f32 = 40.0;
 /// What fraction of the decayed matter returns to the water as plankton, so an
 /// unclaimed body feeds the base of the food web rather than disappearing.
 pub const CORPSE_DECAY_TO_FOOD: f32 = 0.35;
@@ -858,21 +874,9 @@ pub const SNOW_BLOOM_STRENGTH: f32 = 0.85;
 // A rare, enormous carcass sinking from above. A different KIND of resource
 // from marine snow: snow rewards steady filtering along the drift, a carcass
 // rewards noticing one, reaching it fast, and holding it against competitors.
-// --- Leviathan -------------------------------------------------------------
-// Every so often something very large arrives and hunts.
-//
-// It is not a script and not a special case: it is an ordinary individual,
-// seeded big and well-armed, living and dying by exactly the same rules as
-// everything else -- it can starve, it can be swarmed, and its offspring are
-// ordinary animals. What it provides is a transient apex, which real oceans
-// have and this one did not: a source of mortality that a crowded population
-// cannot simply out-breed, and a reason for prey traits to be worth anything.
-// A world where the only way to die is starving is a world where nothing needs
-// to be good at anything else.
-pub const LEVIATHAN_CHANCE: f32 = 0.0006;
-pub const LEVIATHAN_PARTS: u32 = 34;
-pub const LEVIATHAN_SCALE: f32 = 2.4;
-pub const WHALE_FALL_CHANCE: f32 = 0.0012;
+// Raised: at 0.0012 a fall arrived roughly every 830 ticks and, rotting at the
+// same rate as any small corpse, was gone before most animals could find it.
+pub const WHALE_FALL_CHANCE: f32 = 0.0026;
 pub const WHALE_FALL_MIN_PARTS: u32 = 45;
 pub const WHALE_FALL_MAX_PARTS: u32 = 130;
 // Plankton is thin gruel and a carcass is a fortune. Widening that gap is the
@@ -1101,7 +1105,6 @@ pub struct World {
     /// tell that a frequency-dependent drain was killing it.
     pub deaths_disease: u64,
     pub whale_falls: u64,
-    pub leviathans: u64,
     /// Where the world's energy actually comes from, accumulated per source.
     /// Published because "plankton is too nutritive" is a claim about the
     /// SHARE of the economy it represents, and that share has never been
@@ -1302,7 +1305,6 @@ impl World {
             deaths_crowding: 0,
             deaths_disease: 0,
             whale_falls: 0,
-            leviathans: 0,
             spend_capped: 0.0,
             spend_metabolism: 0.0,
             spend_movement: 0.0,
@@ -1618,7 +1620,6 @@ impl World {
         d.set_item("crowded", self.deaths_crowding).unwrap();
         d.set_item("diseased", self.deaths_disease).unwrap();
         d.set_item("whale_falls", self.whale_falls).unwrap();
-        d.set_item("leviathans", self.leviathans).unwrap();
         d.set_item("spend_capped", self.spend_capped).unwrap();
         d.set_item("spend_metabolism", self.spend_metabolism).unwrap();
         d.set_item("spend_movement", self.spend_movement).unwrap();

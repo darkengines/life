@@ -2559,39 +2559,6 @@ pub fn tick(world: &mut World) {
     }
     timings.push(("pop_cap", t0.elapsed().as_secs_f64() * 1000.0));
 
-    // A leviathan arrives. See LEVIATHAN_CHANCE: an ordinary individual seeded
-    // large and well-armed, subject to every rule the rest of the world obeys.
-    // It exists because a population whose only cause of death is starvation
-    // has nothing to be good at except eating, and cannot be thinned by
-    // anything it is able to out-breed.
-    if world.rng.random::<f32>() < crate::LEVIATHAN_CHANCE {
-        let n = world.size as f32;
-        let pos = [
-            world.rng.random_range(0.0..n),
-            world.rng.random_range(n * 0.15..n * 0.85),
-        ];
-        let colour = [235u8, 90u8, 70u8];
-        let slot = crate::individuals::spawn_founder(
-            &mut world.individuals, &mut world.pixels, &mut world.rng, pos, colour);
-        for _ in 0..crate::LEVIATHAN_PARTS {
-            crate::individuals::grow_one_pixel(
-                &mut world.individuals, &mut world.pixels, &mut world.rng, slot);
-        }
-        // Give it the anatomy of a hunter rather than hoping mutation supplies
-        // one: jaws at the front, and the bulk to drive them.
-        let off = world.individuals.pixel_offset[slot] as usize;
-        let cnt = world.individuals.pixel_count[slot] as usize;
-        for k in 0..cnt.min(6) {
-            world.pixels.part_type[off + k] = crate::pixels::PART_MOUTH;
-        }
-        crate::individuals::recompute_part_counts(&mut world.individuals, &world.pixels, slot);
-        world.individuals.size_scale[slot] = crate::LEVIATHAN_SCALE;
-        world.individuals.birth_size[slot] = world.individuals.pixel_count[slot];
-        world.individuals.bite_force[slot] = world.individuals.bite_force[slot].max(2.5);
-        world.individuals.energy[slot] = 400.0;
-        world.leviathans += 1;
-    }
-
     let t0 = std::time::Instant::now();
     // Whale fall. Every so often something very large dies somewhere above and
     // its body comes down -- a single enormous, concentrated windfall in a
@@ -2656,8 +2623,23 @@ pub fn tick(world: &mut World) {
     // Decaying returns some of it to the water as well, so an unclaimed body
     // feeds the plankton instead of vanishing: the nutrients go back into the
     // system the way they actually do.
-    let decay = crate::CORPSE_DECAY_RATE;
     for i in 0..world.corpses.len() {
+        // Big carcasses rot SLOWLY. Decay happens at the surface, and a large
+        // body has far less surface per unit of itself than a small one -- the
+        // same square-cube argument that governs everything else here. A
+        // sardine is gone in a day and a whale fall in the real deep sea feeds
+        // a community for decades.
+        //
+        // Flat decay made a whale fall last about as long as a minnow, so the
+        // single most interesting event in this world came and went in a
+        // thousand ticks and was almost never there to be found. Scaling by
+        // the inverse root of its mass makes a great carcass a place that
+        // persists, which is the entire reason a whale fall matters
+        // ecologically: it is not just a lot of food, it is a lot of food that
+        // stays put long enough to be worth crossing an ocean for.
+        let e = world.corpses[i].energy.max(1.0);
+        let decay = crate::CORPSE_DECAY_RATE
+            * (crate::CORPSE_DECAY_MASS_REF / e).sqrt().clamp(0.08, 1.0);
         let lost = world.corpses[i].energy * decay;
         world.corpses[i].energy -= lost;
         let pos = world.corpses[i].root_pos;
