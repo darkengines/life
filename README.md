@@ -404,6 +404,53 @@ hand every animal a working body for free; the standing requirement is that moti
 consequence of how the body moves and the animal has to learn to use the one it grew. What it gets
 is the sense that makes that learnable.
 
+**The food economy: two knobs, and the wrong one was being turned all night.**
+"Plankton is too nutritive" was answered by instrumenting where energy actually comes from, which
+had never been visible. The answer: **plankton 94% of all energy, predation 1%, scavenging 5%** --
+while predation was causing 44% of deaths. Killing was common and nearly worthless, so nothing
+could make a living as a predator. Predation now pays out of the prey's own reserves, so a fat
+animal is a better meal than a thin one and energy moves *up* the chain instead of being invented
+at each link.
+
+Then the calorie value was cut by hand, repeatedly, and the world kept collapsing. The trajectory
+showed why: not a slow decline but an immediate crash, 98 animals to 4 within a few hundred ticks,
+then a remnant of ten limping along. Each measurement had been taken at a different world age,
+which cannot distinguish a wrong food level from a world already dying.
+
+The cause was structural and was my own earlier fix. Charging intake on exposed surface was meant
+to stop bigger always winning -- and for a *compact* body it does, since perimeter grows as
+sqrt(N). But an **elongated** body's perimeter grows as N, and elongation is exactly what that
+pressure selects for, so intake went straight back to scaling as N against upkeep at N^0.75:
+
+| body | intake / upkeep, before |
+|---|---|
+| 4 parts | **0.98** -- a net loss with food everywhere |
+| 12 parts | 1.29 |
+| 40 parts | 1.74 |
+
+Founders could not establish at any calorie level. Intake is now sublinear in feeding capacity
+(exponent 0.70 against metabolism's 0.75 -- the real filtration exponent), which restores the
+ordering for every body shape rather than only compact ones, and gives 1.95 at three parts falling
+to 1.67 at sixty-four.
+
+Then a proper sweep, 3 seeds x 14000 ticks, scored on the **minimum population after founding**
+rather than an endpoint, because that is where the failure lives:
+
+| calories | production rows | pop | min after founding | starved | eaten |
+|---|---|---|---|---|---|
+| 0.36 | 6 | **9** | 6 | **97%** | 3% |
+| 0.36 | 14 | 217 | 42 | 66% | 30% |
+| **0.80** | **6** | 284 | 88 | **46%** | **49%** |
+| 0.80 | 14 | 465 | 107 | 41% | 46% |
+| 1.60 | 14 | 310 | 154 | 45% | 31% |
+| 1.60 | 30 | 615 | 384 | 41% | 38% |
+
+**Total production, not calories per unit, was starving the world**: at 0.36 calories, going from 6
+rows to 14 takes the population from 9 to 217. Every hand-tuned change that night adjusted the
+wrong knob, and 0.36/6 -- the setting the live world was actually running -- was the single worst
+point in the grid. Shipped at 0.80/6: the least total food among the viable settings, and the only
+one with a genuinely balanced food web at 46% starvation against 49% predation.
+
 ---
 
 ## 8. Roadmap / wishlist

@@ -101,7 +101,22 @@ pub const GRAZE_ORGAN_RATE: f32 = 0.17;
 // enormous winners on thousands of energy while everything else starved --
 // which says the fat animals are not a symptom of too much food but of food
 // being monopolised by whoever is best at gathering it.
-pub const PLANKTON_CALORIES: f32 = 0.36;
+// Chosen by sweep rather than by argument -- 3 seeds, 14000 ticks, scored on
+// the minimum population AFTER founding, because the failure being hunted
+// happens in the first few hundred ticks and no endpoint measurement can see
+// it. The full grid is in README section 7.
+//
+// The lesson from it was that TOTAL PRODUCTION, not calories per unit, was
+// starving the world: at 0.36 calories, going from 6 production rows to 14
+// took the population from 9 to 217. Every hand-tuned change tonight adjusted
+// the wrong knob, and 0.36/6 -- the setting the live world was actually
+// running -- was the single worst point in the grid, with 97% of deaths from
+// starvation and a population of nine.
+//
+// This point is the LEAST total food among the viable settings, and it buys
+// the most balanced food web of any of them: 46% of deaths from starvation
+// against 49% from predation, where every other setting was lopsided.
+pub const PLANKTON_CALORIES: f32 = 0.80;
 /// How long a newly-changed body plan is shielded from full selection while
 /// its inherited controller readapts. See Individuals::innovation_protect.
 pub const NEURITE_MUTATION_STD: f32 = 0.06;
