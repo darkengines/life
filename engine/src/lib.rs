@@ -1003,6 +1003,22 @@ pub const THRUST_OFFSET_MIN_FORCE: f32 = 0.05;
 /// How strongly sex allocation is pulled toward the rarer sex. At 1.0 a
 /// population that is 90% male produces females 90% of the time; at 0 it is a
 /// fair coin and small populations can drift to a single sex and die of it.
+// --- Social affinity (the Particle Life mechanism, under selection) --------
+// Signed attraction between an animal, or one of its components, and each KIND
+// of tissue it meets in another animal. Asymmetric by construction, because the
+// two parties carry different coefficients -- and asymmetry is the whole point:
+// a symmetric interaction matrix settles into equilibrium, while an asymmetric
+// one is what produces chasing, orbiting and persistent structure.
+pub const AFFINITY_INIT_STD: f32 = 0.15;
+pub const AFFINITY_MUTATION_STD: f32 = 0.05;
+/// How far each level reaches, and how hard it pulls. The component level is
+/// short-ranged and shapes how bodies arrange against each other; the animal
+/// level is long-ranged and is what could make a school, a following, or an
+/// avoidance.
+pub const AFFINITY_PART_RANGE: f32 = 4.0;
+pub const AFFINITY_PART_STRENGTH: f32 = 0.30;
+pub const AFFINITY_BODY_RANGE: f32 = 26.0;
+pub const AFFINITY_BODY_STRENGTH: f32 = 0.55;
 pub const SEX_RATIO_CORRECTION: f32 = 0.8;
 /// Hermaphroditism: heritable, above the threshold an animal can pair with
 /// anyone, and it costs upkeep so separate sexes stay viable where mates are
@@ -1065,9 +1081,22 @@ pub const TURN_POSTURE_BIAS_SCALE: f32 = 0.35;
 // and every downstream conclusion -- that the brain was not learning, that
 // navigation was hopeless, that eyes were worthless -- was measuring an animal
 // nailed to its own heading.
-pub const ROTATIONAL_INERTIA: f32 = 0.05;
-pub const ANGULAR_DAMPING: f32 = 2.0;
-pub const MAX_ANGULAR_SPEED: f32 = 2.5;
+// Bracketed by measurement from both sides. At 2.5 (after the second-moment
+// change) animals were nailed in place -- six degrees of turn in three hundred
+// ticks. At 0.05 they went the other way entirely and span on the spot,
+// whirling around their own heads instead of swimming, which is worse: an
+// animal that cannot turn at least holds a course. 0.15 turns briskly without
+// running away with itself.
+pub const ROTATIONAL_INERTIA: f32 = 0.15;
+// Raised with the inertia cut: water resists rotation strongly, and a body
+// that stops being driven should stop turning rather than coasting round.
+pub const ANGULAR_DAMPING: f32 = 4.0;
+// 2.5 rad/tick is 143 degrees per tick -- a complete revolution every two and a
+// half ticks. That ceiling was never reachable while inertia was tenfold too
+// high, so it went unnoticed; the moment turning worked it became the thing
+// that let animals spin instead of swim. A swimming animal turns at a rate you
+// could follow with your eye.
+pub const MAX_ANGULAR_SPEED: f32 = 0.30;
 
 pub const WEATHER_TRIGGER_CHANCE: f64 = 0.0006;
 
@@ -1222,6 +1251,11 @@ pub struct World {
     /// performs as well as one whose children inherit everything, then what
     /// looks like evolution is drift, and no amount of tuning selection
     /// pressure is going to help.
+    /// Runtime scale on both affinity levels. Zero disables them entirely,
+    /// which is the control: animals aggregate around food patches whether or
+    /// not they attract one another, so clustering measured without this
+    /// comparison attributes nothing.
+    pub affinity_scale: f32,
     pub scramble_inheritance: bool,
     pub forced_intent: Option<[f32; 2]>,
     pub backend: locomotion::Backend,
@@ -1397,6 +1431,7 @@ impl World {
             max_pressure: 0.0,
             food_regrow_rate,
             food_cap,
+            affinity_scale: 1.0,
             scramble_inheritance: false,
             forced_intent: None,
             backend: locomotion::Backend::Analytic,
@@ -2180,6 +2215,11 @@ impl World {
             locomotion::Backend::Analytic => "analytic".to_string(),
             locomotion::Backend::Rigid => "rigid".to_string(),
         }
+    }
+
+    /// Test-only: scale both social affinity levels. 0.0 turns them off.
+    fn debug_set_affinity(&mut self, scale: f32) {
+        self.affinity_scale = scale;
     }
 
     /// Test-only: break heredity. Offspring get random traits rather than

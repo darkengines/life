@@ -27,6 +27,27 @@ pub const NEURITE_STACK: usize = 96;
 /// +/-1. Random rather than zero because the entire point is that a new part
 /// contributes a NEW feature the readout can pick up, which a zero matrix
 /// could never do.
+/// A fresh set of tissue preferences, small and centred on indifference, so a
+/// new component starts neutral and drifts into a relationship if one pays.
+pub fn random_affinity(rng: &mut Pcg64) -> [f32; crate::pixels::PART_KIND_COUNT as usize] {
+    let mut a = [0.0f32; crate::pixels::PART_KIND_COUNT as usize];
+    for v in a.iter_mut() {
+        *v = normal(rng, 0.0, crate::AFFINITY_INIT_STD);
+    }
+    a
+}
+
+pub fn inherit_affinity(
+    rng: &mut Pcg64,
+    src: &[f32; crate::pixels::PART_KIND_COUNT as usize],
+) -> [f32; crate::pixels::PART_KIND_COUNT as usize] {
+    let mut a = *src;
+    for v in a.iter_mut() {
+        *v = (*v + normal(rng, 0.0, crate::AFFINITY_MUTATION_STD)).clamp(-1.0, 1.0);
+    }
+    a
+}
+
 pub fn random_neurite(rng: &mut Pcg64) -> [f32; NEURITE_DIM * NEURITE_DIM] {
     let mut w = [0.0f32; NEURITE_DIM * NEURITE_DIM];
     let scale = 1.0 / (NEURITE_DIM as f32).sqrt();
@@ -315,6 +336,18 @@ pub struct Individuals {
     /// carrying both sets of machinery costs upkeep, which is exactly why
     /// separate sexes persist wherever mates are easy to find.
     pub hermaphrodite: Vec<f32>,
+    /// The same signed preference over tissue kinds, but for the animal as a
+    /// whole and at long range -- what it is drawn toward or avoids across open
+    /// water, rather than how its components arrange when already touching.
+    ///
+    /// Two levels because they do different things. Component affinity decides
+    /// how bodies fit against one another: a cleaner settling on a particular
+    /// tissue, a parasite finding the soft part, a body plan that meshes with
+    /// another. Animal affinity decides whether they are ever in the same place
+    /// at all: schooling, following, avoiding, herding. Neither implies the
+    /// other, and only having the short-range one would mean relationships
+    /// could only form by accident.
+    pub body_affinity: Vec<[f32; crate::pixels::PART_KIND_COUNT as usize]>,
     pub birth_size: Vec<u32>,       // pixel_count at birth -- fixed for life; body PLAN doesn't change post-birth
     pub size_scale: Vec<f32>,       // uniform inflation of that fixed plan -- juvenile->adult growth is getting
                                      // BIGGER (every joint length scales up), never sprouting new parts
@@ -417,6 +450,7 @@ impl Individuals {
             female: Vec::with_capacity(cap),
             female_share: 0.5,
             hermaphrodite: Vec::with_capacity(cap),
+            body_affinity: Vec::with_capacity(cap),
             birth_size: Vec::with_capacity(cap),
             size_scale: Vec::with_capacity(cap),
             kin_signature: Vec::with_capacity(cap),
@@ -480,6 +514,7 @@ impl Individuals {
             self.attached_to.push(-1);
             self.female.push(false);
             self.hermaphrodite.push(0.0);
+            self.body_affinity.push([0.0; crate::pixels::PART_KIND_COUNT as usize]);
             self.birth_size.push(1);
             self.size_scale.push(1.0);
             self.kin_signature.push([0.0; crate::KIN_DIM]);
@@ -1034,6 +1069,7 @@ pub fn remove_leaf(individuals: &mut Individuals, pixels: &mut PixelArena, slot:
         pixels.phase_offset[dst] = pixels.phase_offset[src];
         pixels.freq_mult[dst] = pixels.freq_mult[src];
         pixels.drive[dst] = pixels.drive[src];
+        pixels.affinity[dst] = pixels.affinity[src];
         pixels.storage[dst] = pixels.storage[src];
         pixels.size[dst] = pixels.size[src];
         pixels.min_angle[dst] = pixels.min_angle[src];
@@ -1106,6 +1142,7 @@ pub fn randomize_brain_and_traits(individuals: &mut Individuals, rng: &mut Pcg64
     individuals.stickiness[slot] = rng.random_range(0.0..1.0);
     individuals.buoyancy[slot] = rng.random_range(crate::BUOYANCY_MIN..crate::BUOYANCY_MAX);
     individuals.hermaphrodite[slot] = rng.random::<f32>();
+    individuals.body_affinity[slot] = random_affinity(rng);
     individuals.thrust_offset[slot] = rng.random_range(-std::f32::consts::PI..std::f32::consts::PI);
     individuals.steer_sign[slot] = if rng.random::<bool>() { 1.0 } else { -1.0 };
 }
@@ -1268,6 +1305,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.phase_offset[new_offset as usize + k] = pixels.phase_offset[offset as usize + k];
         pixels.freq_mult[new_offset as usize + k] = pixels.freq_mult[offset as usize + k];
         pixels.drive[new_offset as usize + k] = pixels.drive[offset as usize + k];
+        pixels.affinity[new_offset as usize + k] = pixels.affinity[offset as usize + k];
         pixels.storage[new_offset as usize + k] = pixels.storage[offset as usize + k];
         pixels.size[new_offset as usize + k] = pixels.size[offset as usize + k];
         pixels.min_angle[new_offset as usize + k] = pixels.min_angle[offset as usize + k];
@@ -1302,6 +1340,9 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
     pixels.freq_mult[new_offset as usize + count as usize] =
         (par_freq + normal(rng, 0.0, crate::PART_FREQ_MUTATION_STD)).clamp(0.25, 4.0);
     pixels.drive[new_offset as usize + count as usize] = 0.0;
+    // A new component starts indifferent to everything and discovers its own
+    // preferences by mutation, rather than inheriting a neighbour's.
+    pixels.affinity[new_offset as usize + count as usize] = random_affinity(rng);
     let new_size = inherit_scalar(rng, parent_size, crate::PART_SIZE_MUTATION_STD, crate::PART_SIZE_MIN, crate::PART_SIZE_MAX);
     let (mut new_min, mut new_max) = (
         inherit_scalar(rng, parent_min_angle, crate::PART_ANGLE_MUTATION_STD, -std::f32::consts::PI, std::f32::consts::PI),
@@ -1346,6 +1387,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         pixels.phase_offset[m] = pixels.phase_offset[t];
         pixels.freq_mult[m] = pixels.freq_mult[t];
         pixels.drive[m] = 0.0;
+        pixels.affinity[m] = pixels.affinity[t];
         pixels.part_type[m] = pixels.part_type[t];
         pixels.size[m] = pixels.size[t];
         // Hinge limits mirror too, so the pair bends symmetrically rather
@@ -1382,6 +1424,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     pixels.phase_offset[offset as usize] = 0.0;
     pixels.freq_mult[offset as usize] = 1.0;
     pixels.drive[offset as usize] = 0.0;
+    pixels.affinity[offset as usize] = random_affinity(rng);
     let root_size = rng.random_range(0.6..1.4);
     pixels.size[offset as usize] = root_size;
     pixels.min_angle[offset as usize] = -rng.random_range(0.2..2.2);
@@ -1426,6 +1469,7 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     // Founders vary, so both strategies are present for selection to work on
     // rather than one having to be invented from nothing.
     individuals.hermaphrodite[slot] = rng.random::<f32>() * 0.6;
+    individuals.body_affinity[slot] = random_affinity(rng);
     // Explicit resets: slots are RECYCLED (a dead individual's old field
     // values persist until overwritten), not just freshly zero-initialized,
     // so anything not set here would silently leak the previous occupant's
@@ -1495,6 +1539,8 @@ pub fn reproduce_with(individuals: &mut Individuals, pixels: &mut PixelArena, rn
                 + normal(rng, 0.0, crate::PART_FREQ_MUTATION_STD))
                 .clamp(0.25, 4.0);
         pixels.drive[new_offset as usize + k] = 0.0;
+        pixels.affinity[new_offset as usize + k] =
+            inherit_affinity(rng, &pixels.affinity[parent_offset as usize + k]);
     }
 
     let color = if rng.random::<f32>() < crate::COLOR_MUTATION_RATE {
@@ -1556,6 +1602,8 @@ pub fn reproduce_with(individuals: &mut Individuals, pixels: &mut PixelArena, rn
     let female_share = individuals.female_share.clamp(0.05, 0.95);
     let p_female = (0.5 + (0.5 - female_share) * crate::SEX_RATIO_CORRECTION).clamp(0.05, 0.95);
     individuals.female[child] = rng.random::<f32>() < p_female;
+    individuals.body_affinity[child] =
+        inherit_affinity(rng, &individuals.body_affinity[parent]);
     individuals.hermaphrodite[child] = clip(
         individuals.hermaphrodite[parent] + normal(rng, 0.0, crate::HERMAPHRODITE_MUTATION_STD),
         0.0,

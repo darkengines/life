@@ -834,6 +834,82 @@ fn joint_targets(world: &World, slot: usize, t: f32) -> Vec<f32> {
         .collect()
 }
 
+/// Pixel-arena offset of another individual, for reading its tissue types.
+#[inline]
+fn other_off_for(world: &World, other: usize) -> usize {
+    world.individuals.pixel_offset[other] as usize
+}
+
+/// Long-range social force between whole ANIMALS.
+///
+/// The component-level term decides how bodies arrange once they are already
+/// touching; this decides whether they are ever near each other at all. One is
+/// what makes a cleaner settle on a particular tissue or a parasite find the
+/// soft part; the other is what makes a school, a following, or an avoidance.
+/// Neither implies the other.
+///
+/// An animal is drawn toward or away from what another is MADE OF, summed over
+/// the tissue in it, so the relationship is to a body plan rather than to a
+/// species label -- and it is asymmetric, because the two parties carry
+/// different coefficients. A follows B while B flees A is expressible, and it
+/// is exactly the asymmetry that makes chasing and orbiting possible instead of
+/// everything settling into a clump.
+fn social_affinity(world: &mut World, grid: &SpatialGrid) {
+    if world.affinity_scale.abs() < 1e-6 {
+        return;
+    }
+    let slots: Vec<usize> = (0..world.individuals.alive.len())
+        .filter(|&s| world.individuals.alive[s])
+        .collect();
+    let wn = world.size as f32;
+    let range = crate::AFFINITY_BODY_RANGE;
+    for slot in slots {
+        let aff = world.individuals.body_affinity[slot];
+        // Indifferent animals cost nothing: no query, no traversal.
+        if aff.iter().all(|v| v.abs() < 1e-3) {
+            continue;
+        }
+        let pos = world.individuals.root_pos[slot];
+        let mut fx = 0.0f32;
+        let mut fy = 0.0f32;
+        for other in grid.nearby_radius(pos, range) {
+            let other = other as usize;
+            if other == slot || !world.individuals.alive[other] {
+                continue;
+            }
+            let opos = world.individuals.root_pos[other];
+            let dx = wrap_delta(opos[0] - pos[0], wn);
+            let dy = opos[1] - pos[1];
+            let d2 = dx * dx + dy * dy;
+            if d2 < 1e-6 || d2 > range * range {
+                continue;
+            }
+            // How strongly this animal feels about what that one is built of,
+            // weighted by how much of each tissue it carries.
+            let counts = &world.individuals.part_counts[other];
+            let mut pull = 0.0f32;
+            let mut total = 0.0f32;
+            for k in 0..crate::pixels::PART_KIND_COUNT as usize {
+                let n = counts[k] as f32;
+                pull += aff[k] * n;
+                total += n;
+            }
+            if total < 1.0 || pull.abs() < 1e-4 {
+                continue;
+            }
+            pull /= total;
+            let d = d2.sqrt();
+            let falloff = 1.0 - d / range;
+            let mag = pull * falloff * falloff * crate::AFFINITY_BODY_STRENGTH * world.dt
+                * world.affinity_scale;
+            fx += dx / d * mag;
+            fy += dy / d * mag;
+        }
+        world.individuals.velocity[slot][0] += fx;
+        world.individuals.velocity[slot][1] += fy;
+    }
+}
+
 fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<Vec<[f32; 2]>>]) {
     let slots: Vec<usize> = (0..world.individuals.alive.len())
         .filter(|&s| {
@@ -1546,6 +1622,10 @@ pub fn tick(world: &mut World) {
     let t0 = std::time::Instant::now();
     tentacle_herding(world, &grid, &pos_cache);
     timings.push(("herding", t0.elapsed().as_secs_f64() * 1000.0));
+
+    let t0 = std::time::Instant::now();
+    social_affinity(world, &grid);
+    timings.push(("affinity", t0.elapsed().as_secs_f64() * 1000.0));
 
     // Rigid-body backend, if this world is running one. Bodies are synced (any
     // whose plan has changed since it was built is rebuilt), each joint motor
@@ -2964,6 +3044,7 @@ fn contact_force(
     // is blind to kinship on purpose: competition for physical space does not
     // care who your relatives are.
     let mut foreign_near = 0.0f32;
+    let affinity_scale = world.affinity_scale;
     let wn = world.size as f32;
     let mut push = [0f32; 2];
     // Contact was a pure force: divided by mass, fought by damping, and
@@ -2986,7 +3067,11 @@ fn contact_force(
     let my_off = world.individuals.pixel_offset[slot] as usize;
     for (pi, &p) in ind_pos.iter().enumerate() {
         let my_girth = crate::pixels::girth(&world.pixels, my_off + pi) * my_scale;
-        let query = crate::COLLISION_RADIUS * 0.5 * (my_girth + max_girth);
+        // Widened to the affinity range so one traversal serves both contact
+        // and social force. Contact is the short end of the same neighbourhood.
+        let contact_reach = crate::COLLISION_RADIUS * 0.5 * (my_girth + max_girth);
+        let query = contact_reach.max(crate::AFFINITY_PART_RANGE);
+        let my_affinity = world.pixels.affinity[my_off + pi];
         part_grid.for_each_near(p, query, |other_u, oi_u| {
             let other = other_u as usize;
             if other == slot || !world.individuals.alive[other] { return; }
@@ -3006,6 +3091,24 @@ fn contact_force(
             let dy = p[1] - op[1];
             let d2 = dx * dx + dy * dy;
             if d2 <= 1e-12 { return; }
+
+            // Social force between COMPONENTS: this part's signed preference
+            // for that kind of tissue. Falls off smoothly to nothing at range
+            // so there is no discontinuity as neighbours enter and leave, and
+            // it is separate from contact -- an attracted pair still cannot
+            // occupy the same water, they simply come to rest touching.
+            if d2 < crate::AFFINITY_PART_RANGE * crate::AFFINITY_PART_RANGE {
+                let kind = world.pixels.part_type[other_off_for(world, other) + oi] as usize;
+                let pull = my_affinity[kind];
+                if pull.abs() > 1e-4 {
+                    let d = d2.sqrt();
+                    let falloff = 1.0 - d / crate::AFFINITY_PART_RANGE;
+                    let mag = pull * falloff * falloff * crate::AFFINITY_PART_STRENGTH * affinity_scale;
+                    // Negative pull pushes apart, positive draws together.
+                    push[0] -= dx / d * mag;
+                    push[1] -= dy / d * mag;
+                }
+            }
             let other_off = world.individuals.pixel_offset[other] as usize;
             let other_scale = world.individuals.size_scale[other];
             let reach = crate::COLLISION_RADIUS

@@ -50,6 +50,26 @@ pub struct PixelArena {
     /// drives each organ individually rather than setting one dial for the
     /// whole body.
     pub drive: Vec<f32>,
+    /// How this component is drawn toward, or driven away from, each KIND of
+    /// tissue it meets in another animal. One coefficient per part type,
+    /// signed: positive attracts, negative repels.
+    ///
+    /// This is the Particle Life mechanism, put under selection. In that model
+    /// a fixed asymmetric matrix of attractions between particle types is
+    /// enough, on its own, to produce cells, chasers and orbiting clusters out
+    /// of nothing -- and the asymmetry is essential, because a symmetric matrix
+    /// settles into equilibrium and stops being interesting. Everything here
+    /// currently interacts through collision, which is symmetric by
+    /// construction, and predation, which is a discrete event. There is no
+    /// channel through which schooling, symbiosis, cleaning, parasitism or
+    /// herding could arise at all, however strong the selection for them.
+    ///
+    /// Asymmetry comes for free: my tentacle's pull toward your flank is a
+    /// different number from your flank's pull toward my tentacle, because they
+    /// are different components carrying different coefficients. Nothing here
+    /// scripts a relationship -- it makes relationships POSSIBLE, and leaves
+    /// which ones pay to selection.
+    pub affinity: Vec<[f32; crate::pixels::PART_KIND_COUNT as usize]>,
     pub dead: Vec<bool>,
     pub memory: Vec<[f32; 4]>,
     /// This component's own little neural unit.
@@ -203,7 +223,7 @@ impl PixelArena {
     pub fn new() -> Self {
         PixelArena {
             parent_idx: Vec::new(), rest_angle: Vec::new(), flex: Vec::new(),
-            phase_offset: Vec::new(), freq_mult: Vec::new(), drive: Vec::new(), dead: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
+            phase_offset: Vec::new(), freq_mult: Vec::new(), drive: Vec::new(), affinity: Vec::new(), dead: Vec::new(), memory: Vec::new(), neurite: Vec::new(), storage: Vec::new(),
             size: Vec::new(), min_angle: Vec::new(), max_angle: Vec::new(), health: Vec::new(),
             part_type: Vec::new(),
             symmetric: Vec::new(),
@@ -231,6 +251,7 @@ impl PixelArena {
         self.phase_offset.resize(new_len as usize, 0.0);
         self.freq_mult.resize(new_len as usize, 1.0);
         self.drive.resize(new_len as usize, 0.0);
+        self.affinity.resize(new_len as usize, [0.0; crate::pixels::PART_KIND_COUNT as usize]);
         self.dead.resize(new_len as usize, false);
         self.memory.resize(new_len as usize, [0.0; 4]);
         self.neurite.resize(
