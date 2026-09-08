@@ -19,7 +19,10 @@
 mod combat;
 mod fields;
 mod individuals;
+mod locomotion;
 mod physics;
+#[cfg(feature = "rapier")]
+mod rigid;
 mod pixels;
 mod spatial;
 mod terrain;
@@ -515,6 +518,21 @@ pub const METABOLIC_EXPONENT: f32 = 0.75;
 /// Area of a typical plain body part, so charging upkeep on area rather than
 /// on a part count did not silently rescale the entire energy economy.
 pub const PART_AREA_REF: f32 = 0.49;
+
+// --- Rigid-body backend --------------------------------------------------
+// Only used when the rigid backend is selected. Damping stands in for the
+// isotropic part of fluid resistance; the direction-dependent part, which is
+// what actually turns an undulation into forward motion, is applied as
+// explicit per-segment forces exactly as the analytic model does.
+pub const RIGID_LINEAR_DAMPING: f32 = 0.35;
+pub const RIGID_ANGULAR_DAMPING: f32 = 1.2;
+pub const RIGID_DENSITY: f32 = 1.0;
+/// How hard a joint motor chases the angle the wave is asking for, and how
+/// heavily that motor is damped. This is the knob that decides whether an
+/// animal is a stiff machine executing its commanded pose or a soft body that
+/// can be pushed out of it -- the whole reason to run this backend.
+pub const RIGID_MOTOR_STIFFNESS: f32 = 12.0;
+pub const RIGID_MOTOR_DAMPING: f32 = 1.5;
 /// How many ticks a signal field waits between diffusion steps. Each field is
 /// updated once per stride at a correspondingly larger rate, which is very
 /// nearly the same smoothing operator applied a third as often.
@@ -1154,6 +1172,13 @@ pub struct World {
     pub mean_pressure: f32,
     pub max_pressure: f32,
 
+    /// Which body-physics backend this world runs. See locomotion.rs: the
+    /// analytic model is fast and unconditionally stable, the rigid one is
+    /// richer and dearer, and neither is simply better -- so it is a runtime
+    /// choice rather than a rewrite.
+    pub backend: locomotion::Backend,
+    #[cfg(feature = "rapier")]
+    pub rigid: Option<rigid::RigidBodies>,
     pub timings: Vec<(&'static str, f64)>, // (phase, milliseconds) for the most recent tick -- diagnostic only
 
     // See ExperienceRow's doc comment. Sampled at EXPERIENCE_SAMPLE_STRIDE
@@ -1324,6 +1349,9 @@ impl World {
             max_pressure: 0.0,
             food_regrow_rate,
             food_cap,
+            backend: locomotion::Backend::Analytic,
+            #[cfg(feature = "rapier")]
+            rigid: None,
             timings: Vec::new(),
             experience_log: Vec::new(),
             pathogen_damage_rate: PATHOGEN_DAMAGE_RATE,
@@ -2063,6 +2091,45 @@ impl World {
     /// Test-only: overrides the per-part reproduction cost for a sweep.
     fn debug_set_repro_cost_per_part(&mut self, v: f32) {
         self.repro_cost_per_part = v;
+    }
+
+    /// Choose the body-physics backend: "analytic" or "rigid".
+    ///
+    /// Switchable at runtime and mid-run. Bodies entering the rigid solver are
+    /// seeded from their current analytic pose, so a world can be handed over
+    /// without anything teleporting, and handing it back simply stops reading
+    /// the solver. Returns the name actually in force, so a caller asking for a
+    /// backend this build does not have is told so rather than silently
+    /// getting the other one.
+    fn set_physics_backend(&mut self, name: &str) -> String {
+        match locomotion::Backend::from_name(name) {
+            Some(locomotion::Backend::Rigid) => {
+                #[cfg(feature = "rapier")]
+                {
+                    self.backend = locomotion::Backend::Rigid;
+                }
+            }
+            Some(locomotion::Backend::Analytic) => {
+                self.backend = locomotion::Backend::Analytic;
+                #[cfg(feature = "rapier")]
+                {
+                    // Drop the solver's state: stale bodies would be rebuilt
+                    // anyway on switching back, and holding them costs memory
+                    // for a world no longer using them.
+                    self.rigid = None;
+                }
+            }
+            None => {}
+        }
+        self.physics_backend()
+    }
+
+    /// Which backend is actually running.
+    fn physics_backend(&self) -> String {
+        match self.backend {
+            locomotion::Backend::Analytic => "analytic".to_string(),
+            locomotion::Backend::Rigid => "rigid".to_string(),
+        }
     }
 
     /// Test-only: overrides the pathogen damage rate for an A/B run.

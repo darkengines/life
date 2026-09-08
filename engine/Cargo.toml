@@ -15,6 +15,15 @@ rand = "0.9"
 rand_pcg = "0.9"
 rand_distr = "0.5"
 rayon = "1"
+# Optional rigid-body backend. Behind a feature so the analytic model remains
+# the default and the build stays fast when rapier is not wanted: the whole
+# point of the abstraction is that either engine can be chosen for the context,
+# and that includes choosing not to compile the heavy one at all.
+rapier2d = { version = "0.22", optional = true }
+
+[features]
+default = ["rapier"]
+rapier = ["dep:rapier2d"]
 
 [profile.release]
 lto = true

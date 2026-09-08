@@ -56,7 +56,23 @@ fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
 /// Real forward kinematics through the growth-order joint chain, with a
 /// per-pixel-flex-scaled traveling-wave oscillation -- matches
 /// pixel_world.py's `Individual.world_positions`.
+/// Component world positions, from whichever backend this world is running.
+///
+/// Everything downstream -- senses, feeding, collision, combat, rendering --
+/// goes through here and cannot tell which engine produced the answer. That is
+/// the entire point of the split: swapping the physics must not require
+/// touching anything that merely consumes positions.
 pub fn world_positions(world: &World, slot: usize, t: f32) -> Vec<[f32; 2]> {
+    #[cfg(feature = "rapier")]
+    if world.backend == crate::locomotion::Backend::Rigid {
+        if let Some(r) = world.rigid.as_ref() {
+            return crate::locomotion::BodyPhysics::positions(r, world, slot, t);
+        }
+    }
+    analytic_positions(world, slot, t)
+}
+
+pub fn analytic_positions(world: &World, slot: usize, t: f32) -> Vec<[f32; 2]> {
     world_positions_at(world, slot, t, world.individuals.root_pos[slot])
 }
 
@@ -744,6 +760,74 @@ pub(crate) fn sense(world: &World, slot: usize, grid: &SpatialGrid) -> ([f32; SE
 ///
 /// It costs nothing for the overwhelming majority of the population: a body
 /// needs both a tentacle and a mouth before any of this runs at all.
+/// Drive and step the rigid-body solver for one tick.
+///
+/// The motor targets are the same bending angles the analytic model would have
+/// assigned outright. That equivalence is deliberate: the two backends are
+/// given identical intent, and any difference in what the animals do is a
+/// difference in the PHYSICS rather than in what they were asked to do -- which
+/// is the only way a comparison between them means anything.
+#[cfg(feature = "rapier")]
+fn step_rigid(world: &mut World, alive_slots: &[usize]) {
+    use std::collections::HashMap;
+    if world.rigid.is_none() {
+        world.rigid = Some(crate::rigid::RigidBodies::new(world.dt, world.gravity));
+    }
+    let t = world.sim_time;
+    let mut targets: HashMap<usize, Vec<f32>> = HashMap::new();
+    let mut needs_build: Vec<usize> = Vec::new();
+    for &slot in alive_slots {
+        if !world.individuals.alive[slot] {
+            continue;
+        }
+        needs_build.push(slot);
+        targets.insert(slot, joint_targets(world, slot, t));
+    }
+    // Split the borrow: the solver is moved out, driven, and put back, because
+    // it needs &mut World to write results while itself living inside World.
+    let mut rigid = world.rigid.take().unwrap();
+    for slot in needs_build {
+        crate::locomotion::BodyPhysics::body_changed(&mut rigid, world, slot);
+    }
+    rigid.step_world(world, &targets);
+    world.rigid = Some(rigid);
+}
+
+/// The bend angle each joint is being asked to hold this tick -- the same
+/// quantity the analytic model applies directly to its kinematic chain.
+#[cfg(feature = "rapier")]
+fn joint_targets(world: &World, slot: usize, t: f32) -> Vec<f32> {
+    let offset = world.individuals.pixel_offset[slot] as usize;
+    let count = world.individuals.pixel_count[slot] as usize;
+    let amp = world.individuals.bend_amplitude[slot] * world.individuals.swim_gain[slot];
+    let freq = world.individuals.bend_frequency[slot];
+    let phase = world.individuals.bend_phase[slot];
+    let mut depth = vec![0f32; count];
+    for k in 0..count {
+        let parent = world.pixels.parent_idx[offset + k];
+        depth[k] = if parent < 0 { 0.0 } else { depth[parent as usize] + 1.0 };
+    }
+    (0..count)
+        .map(|k| {
+            let flex = world.pixels.flex[offset + k];
+            let drive = 1.0 + crate::PART_DRIVE_AUTHORITY * world.pixels.drive[offset + k];
+            let wave = world.pixels.mirror_sign[offset + k] * flex * amp * drive.max(0.0)
+                * (std::f32::consts::TAU * freq * world.pixels.freq_mult[offset + k] * t
+                    + phase
+                    + world.pixels.phase_offset[offset + k]
+                    + depth[k] * crate::BODY_WAVE_NUMBER)
+                    .sin();
+            let osc = wave.clamp(
+                world.pixels.min_angle[offset + k],
+                world.pixels.max_angle[offset + k],
+            );
+            let posture = (world.individuals.turn_curvature[slot] * flex)
+                .clamp(-crate::MAX_POSTURE_BEND, crate::MAX_POSTURE_BEND);
+            osc + posture
+        })
+        .collect()
+}
+
 fn tentacle_herding(world: &mut World, grid: &SpatialGrid, pos_cache: &[Option<Vec<[f32; 2]>>]) {
     let slots: Vec<usize> = (0..world.individuals.alive.len())
         .filter(|&s| {
@@ -1451,6 +1535,22 @@ pub fn tick(world: &mut World) {
     let t0 = std::time::Instant::now();
     tentacle_herding(world, &grid, &pos_cache);
     timings.push(("herding", t0.elapsed().as_secs_f64() * 1000.0));
+
+    // Rigid-body backend, if this world is running one. Bodies are synced (any
+    // whose plan has changed since it was built is rebuilt), each joint motor
+    // is given the angle the undulation wave is currently asking for, and the
+    // solver is stepped -- which then writes root position, velocity and
+    // heading back into the individual table.
+    //
+    // The analytic model's own force integration still runs above; with the
+    // rigid backend the solver's answer simply lands on top of it, because the
+    // solver is the thing that actually moved the body.
+    #[cfg(feature = "rapier")]
+    if world.backend == crate::locomotion::Backend::Rigid {
+        let t0 = std::time::Instant::now();
+        step_rigid(world, &alive_slots);
+        timings.push(("rigid_solver", t0.elapsed().as_secs_f64() * 1000.0));
+    }
 
     let attached_targets: std::collections::HashSet<usize> = alive_slots.iter()
         .filter_map(|&s| world.individuals.resolve_attached_target(s))

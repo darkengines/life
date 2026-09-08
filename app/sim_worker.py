@@ -13,6 +13,7 @@ rename (write-then-replace) every tick; live_app.py just reads that file on
 each HTTP request. No sockets, no shared memory, no locks needed."""
 import colorsys
 import json
+import os
 import time
 from collections import deque
 from pathlib import Path
@@ -246,6 +247,17 @@ def update_chronicle(alive, tick_count, weather):
 
 def _new_world():
     world = rust_world.World(WORLD_SIZE, FOOD_REGROW_RATE, 1.0, POP_CAP, None, FOOD_PATCHES)
+    # Body physics is a runtime choice, not a rewrite -- see engine/src/locomotion.rs.
+    # "analytic" is the kinematic-chain model: fast, unconditionally stable.
+    # "rigid" hands the same bodies to a constraint solver: momentum, recoil,
+    # bodies that can be pushed out of the pose they commanded -- measured at
+    # about 4.6x the cost. Set PHYSICS_BACKEND to switch.
+    backend = os.environ.get("PHYSICS_BACKEND", "analytic")
+    actual = world.set_physics_backend(backend)
+    if actual != backend:
+        print(f"[physics] '{backend}' unavailable in this build; running '{actual}'", flush=True)
+    else:
+        print(f"[physics] backend: {actual}", flush=True)
     world.spawn_random(FOUNDER_COUNT)
     return world
 
