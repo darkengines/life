@@ -1738,8 +1738,14 @@ pub fn tick(world: &mut World) {
         let excess = (share - share_threshold).max(0.0);
         let pathogen_pressure =
             ((excess / crate::PATHOGEN_SHARE_SCALE).powi(2)).min(crate::PATHOGEN_PRESSURE_MAX);
-        let (move_x, move_y, reproduce_urge, fight_urge, crawl_intent, acid_intent, light_intent) =
+        let (mut move_x, mut move_y, reproduce_urge, fight_urge, crawl_intent, acid_intent, light_intent) =
             (d[0], d[1], d[2], d[3], d[4], d[5], d[6]);
+        // Test hook: hold intent fixed so the steering loop can be measured
+        // without the brain changing its mind underneath the measurement.
+        if let Some(f) = world.forced_intent {
+            move_x = f[0];
+            move_y = f[1];
+        }
         // Swim effort: tanh output remapped onto a positive gain, so a brain
         // can idle to save energy or drive its body hard. Applied to the NEXT
         // tick's kinematics, since this tick's positions were already cached.
@@ -1762,7 +1768,24 @@ pub fn tick(world: &mut World) {
             let desired_mag = (move_x * move_x + move_y * move_y).sqrt().min(1.0);
             let directional_steer = if desired_mag > 0.05 {
                 let desired_heading = move_y.atan2(move_x);
-                let heading_error = (desired_heading - world.individuals.heading[slot]
+                // Aim the direction this body actually PUSHES at the target,
+                // not the direction it points.
+                //
+                // These are not the same thing and were never going to be: the
+                // angle between them is a property of the individual body plan
+                // and scatters almost uniformly across bodies. Steering the
+                // nose at a target therefore sent a great many animals directly
+                // away from it, and population alignment between intent and
+                // motion measured negative -- animals reliably swimming the
+                // wrong way, which is exactly what it looked like.
+                //
+                // The offset is the animal's own running measurement of where
+                // its propulsion goes relative to where it faces, so this is
+                // an animal that has learned which way it swims, not one handed
+                // a corrected body.
+                let effective = world.individuals.heading[slot]
+                    + world.individuals.thrust_offset[slot];
+                let heading_error = (desired_heading - effective
                     + std::f32::consts::PI)
                     .rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI;
@@ -1771,14 +1794,56 @@ pub fn tick(world: &mut World) {
                 0.0
             };
             let posture_bias = d[crate::individuals::TURN_BIAS_IDX] * crate::TURN_POSTURE_BIAS_SCALE;
-            world.individuals.turn_curvature[slot] =
-                (directional_steer + posture_bias).clamp(-1.0, 1.0) * crate::TURN_CURVATURE_SCALE;
+            // Applied through this body's learned steering polarity, so an
+            // animal whose geometry inverts the relationship stops fighting
+            // itself. Nothing here tells it WHERE to go; it corrects HOW its
+            // own command reaches its own body.
+            world.individuals.turn_curvature[slot] = (directional_steer
+                * world.individuals.steer_sign[slot].signum()
+                + posture_bias)
+                .clamp(-1.0, 1.0)
+                * crate::TURN_CURVATURE_SCALE;
 
             // Test hook: hold the body's shape fixed so propulsion can be
             // measured without the brain reshaping it every tick.
             if let Some((c, g)) = world.freeze_locomotion {
                 world.individuals.turn_curvature[slot] = c;
                 world.individuals.swim_gain[slot] = g;
+            }
+
+            // Update this body's own estimate of which way it pushes: the
+            // angle of its current thrust, expressed relative to its heading,
+            // smoothed over time. Only updated while genuinely propelling --
+            // the direction of a negligible force is noise, and folding noise
+            // into the estimate would make an animal chase its own tail.
+            // Learn the polarity: correlate the curvature commanded last tick
+            // with the rotation that actually followed. Positive means the body
+            // turns the way it was asked; negative means it is inverted, and
+            // the sign flips once the evidence accumulates.
+            {
+                let cmd = world.individuals.turn_curvature[slot];
+                let rot = world.individuals.angular_velocity[slot];
+                if cmd.abs() > 0.02 && rot.abs() > 1e-4 {
+                    let evidence = (cmd * rot).signum();
+                    let prev = world.individuals.steer_sign[slot];
+                    world.individuals.steer_sign[slot] =
+                        (prev + (evidence - prev) * crate::STEER_SIGN_LEARN_RATE).clamp(-1.5, 1.5);
+                }
+            }
+            {
+                let tmag = (thrust[0] * thrust[0] + thrust[1] * thrust[1]).sqrt();
+                if tmag > crate::THRUST_OFFSET_MIN_FORCE {
+                    let ang = thrust[1].atan2(thrust[0]) - world.individuals.heading[slot];
+                    let prev = world.individuals.thrust_offset[slot];
+                    // Circular smoothing: averaging angles directly would put
+                    // the mean of +179 and -179 degrees at zero, i.e. exactly
+                    // backwards from the truth.
+                    let d = (ang - prev + std::f32::consts::PI)
+                        .rem_euclid(std::f32::consts::TAU)
+                        - std::f32::consts::PI;
+                    world.individuals.thrust_offset[slot] =
+                        prev + d * crate::THRUST_OFFSET_LEARN_RATE;
+                }
             }
 
             // The real second moment about the balance point, so a long body
@@ -1835,7 +1900,11 @@ pub fn tick(world: &mut World) {
             let fin = thrust_multiplier(world, slot);
             let tn = world.thermal_noise;
             let noise = [normal(&mut world.rng, 0.0, tn), normal(&mut world.rng, 0.0, tn)];
-            let gravity_force = [0.0, -world.gravity * mass];
+            // Weight MINUS the buoyancy of the water displaced. At a density
+            // of 1.0 these cancel and the animal is weightless in the column,
+            // free to go where it swims instead of where it falls.
+            let net_density = world.individuals.buoyancy[slot] - 1.0;
+            let gravity_force = [0.0, -world.gravity * mass * net_density];
             let vel = world.individuals.velocity[slot];
             let accel = [
                 (thrust[0] * mobility * fin + contact[0] + gravity_force[0] + crawl_force[0] * mobility) / mass - crate::LINEAR_DAMPING * vel[0] + noise[0] * mobility / mass.sqrt(),

@@ -988,6 +988,22 @@ pub const REWARD_REPRODUCE: f32 = 1.0;
 /// present EVERY tick, which reproduction is not, so it is the signal a
 /// controller can actually learn locomotion from.
 pub const REWARD_MOTOR_MATCH: f32 = 0.02;
+/// How fast an animal's estimate of its own propulsion direction converges,
+/// and the force below which thrust direction is treated as noise rather than
+/// information. Slow on purpose: this is a body property, so it should settle
+/// over a life rather than jitter tick to tick.
+pub const THRUST_OFFSET_LEARN_RATE: f32 = 0.02;
+pub const THRUST_OFFSET_MIN_FORCE: f32 = 0.05;
+/// Heritable body density relative to water. Founders start neutral; drift
+/// lets lineages become heavy bottom-dwellers or light surface-hunters. The
+/// bounds are deliberately narrow -- real animals trim their density, they do
+/// not become bricks or balloons.
+/// How fast an animal learns whether its steering is inverted. Slow, because
+/// a single tick's rotation is dominated by whatever it collided with.
+pub const STEER_SIGN_LEARN_RATE: f32 = 0.01;
+pub const BUOYANCY_MUTATION_STD: f32 = 0.02;
+pub const BUOYANCY_MIN: f32 = 0.88;
+pub const BUOYANCY_MAX: f32 = 1.12;
 /// Keeping a full larder is worth a little every tick. Deliberately far below
 /// the reproduction reward: rewarding energy directly was previously measured
 /// making animals hoard rather than breed (mean energy tripled, births fell
@@ -1027,7 +1043,19 @@ pub const TURN_CURVATURE_SCALE: f32 = 0.9;
 // into a knot, but generous enough that steering actually has authority.
 pub const MAX_POSTURE_BEND: f32 = 0.9;
 pub const TURN_POSTURE_BIAS_SCALE: f32 = 0.35;
-pub const ROTATIONAL_INERTIA: f32 = 2.5;
+// Rescaled. Rotation was changed to use the real second moment of mass about
+// the centre of mass -- correct physics, and it fixed animals pivoting on their
+// nose -- but the second moment of a ten-part body is about 79 where the mass
+// sum it replaced was 7.7, so inertia silently grew tenfold and this constant
+// was never adjusted to match.
+//
+// The consequence was total: traced on a single animal commanded due east, its
+// turn_curvature sat SATURATED at the clamp while its heading moved six degrees
+// in three hundred ticks. It was not steering badly, it could not turn at all,
+// and every downstream conclusion -- that the brain was not learning, that
+// navigation was hopeless, that eyes were worthless -- was measuring an animal
+// nailed to its own heading.
+pub const ROTATIONAL_INERTIA: f32 = 0.05;
 pub const ANGULAR_DAMPING: f32 = 2.0;
 pub const MAX_ANGULAR_SPEED: f32 = 2.5;
 
@@ -1176,6 +1204,9 @@ pub struct World {
     /// analytic model is fast and unconditionally stable, the rigid one is
     /// richer and dearer, and neither is simply better -- so it is a runtime
     /// choice rather than a rewrite.
+    /// Test-only: when set, replaces every brain's movement intent, isolating
+    /// the steering loop from the brain driving it.
+    pub forced_intent: Option<[f32; 2]>,
     pub backend: locomotion::Backend,
     #[cfg(feature = "rapier")]
     pub rigid: Option<rigid::RigidBodies>,
@@ -1349,6 +1380,7 @@ impl World {
             max_pressure: 0.0,
             food_regrow_rate,
             food_cap,
+            forced_intent: None,
             backend: locomotion::Backend::Analytic,
             #[cfg(feature = "rapier")]
             rigid: None,
@@ -2130,6 +2162,20 @@ impl World {
             locomotion::Backend::Analytic => "analytic".to_string(),
             locomotion::Backend::Rigid => "rigid".to_string(),
         }
+    }
+
+    /// Test-only: override every animal's movement intent with one fixed
+    /// direction.
+    ///
+    /// This separates two things that look identical from outside and need
+    /// opposite fixes. Population alignment between intent and motion sits at
+    /// 0.089, and that is consistent BOTH with a control loop that cannot
+    /// track a target and with a control loop that tracks perfectly while the
+    /// brain asks for something different every tick. Forcing the intent
+    /// removes the brain from the loop: whatever alignment remains is what the
+    /// body and its steering can actually achieve.
+    fn debug_force_intent(&mut self, dx: f32, dy: f32) {
+        self.forced_intent = if dx == 0.0 && dy == 0.0 { None } else { Some([dx, dy]) };
     }
 
     /// Test-only: overrides the pathogen damage rate for an A/B run.

@@ -209,6 +209,64 @@ pub struct Individuals {
     /// stayed flat no matter how fast a creature was going. Subtracting this
     /// makes `heading` mean what it claims: the direction the body points.
     pub axis_offset: Vec<f32>,
+    /// The angle, in this body's own frame, at which it actually pushes.
+    ///
+    /// Measured from the animal's own propulsion rather than inferred from its
+    /// shape, and this distinction is the difference between an animal that can
+    /// swim somewhere and one that cannot. `axis_offset` derives "forward" from
+    /// where the body's mass sits relative to its root, which turned out not to
+    /// predict thrust at all: across fifteen body plans the angle between where
+    /// a body POINTS and where it PUSHES scattered almost uniformly (consistency
+    /// R = 0.259, individual offsets reaching +/-170 degrees). Steering toward a
+    /// target therefore sent many animals directly away from it, and the
+    /// population-wide alignment between intent and motion measured NEGATIVE.
+    ///
+    /// This is not handing an animal a correct body. Which way a body pushes is
+    /// a fact about that body, and an animal that has been swimming for a while
+    /// unavoidably knows it -- every real swimmer calibrates intent against
+    /// sensed motion, and none of them are born knowing their own hydrodynamics
+    /// either. What it removes is an engine-side error: "forward" was being
+    /// defined by centroid geometry when the only definition that means anything
+    /// is which way the thing actually goes.
+    pub thrust_offset: Vec<f32>,
+    /// Body density relative to the water, heritable. 1.0 is neutral: the
+    /// animal neither rises nor sinks and can go wherever it swims.
+    ///
+    /// There was no buoyancy at all, which turned out to be the single largest
+    /// obstacle to anything ever swimming anywhere. Measured by forcing every
+    /// animal's intent to one direction and watching where they actually went:
+    /// commanded DOWN they complied (alignment +0.76, 78% within 45 degrees),
+    /// commanded UP they went down anyway (-0.81), and commanded sideways they
+    /// went down (near zero). They were not steering badly, they were falling,
+    /// and no amount of intelligence can steer a stone.
+    ///
+    /// Every animal that lives in open water solves this, and solves it the
+    /// same way: match your density to the water. Fish carry a swim bladder,
+    /// sharks an oil-rich liver, cephalopods pump ammonium. Making it a
+    /// heritable trait rather than a constant means an animal can also choose
+    /// NOT to be neutral -- a bottom-dweller that sinks costs nothing to stay
+    /// down, and something hunting near the surface can float.
+    pub buoyancy: Vec<f32>,
+    /// Which way this body actually TURNS when it curves itself, learned from
+    /// its own rotation.
+    ///
+    /// Steering here works by holding a curvature: a bent body pushes water
+    /// asymmetrically and the resulting torque rotates it. But whether a given
+    /// curvature rotates an animal left or right depends on where its mass and
+    /// its surfaces happen to sit, and these bodies are grown by mutation, so
+    /// for a good fraction of them the relationship is INVERTED. Such an animal
+    /// commands a left turn, rotates right, commands harder, rotates further
+    /// wrong -- a control loop with the sign flipped does not merely fail, it
+    /// actively runs away from its target.
+    ///
+    /// Measured with the brain removed and intent forced in one direction,
+    /// animals managed 18-28% within 45 degrees of where they were told to go,
+    /// in every direction equally. This is the same lesson as thrust_offset one
+    /// level down: the map from command to outcome is a property of the
+    /// individual body, and an animal has to discover it. Correlating commanded
+    /// curvature against the rotation that followed is exactly what an efference
+    /// copy is for, and every real motor system does it.
+    pub steer_sign: Vec<f32>,
     // Cached count of each body-part kind (see pixels.rs). Derived data, not
     // genome: recomputed only when a body actually changes (birth, growth, a
     // part bitten off), so the per-tick effect lookups stay O(1) instead of
@@ -328,6 +386,9 @@ impl Individuals {
             turn_curvature: Vec::with_capacity(cap),
             angular_velocity: Vec::with_capacity(cap),
             axis_offset: Vec::with_capacity(cap),
+            thrust_offset: Vec::with_capacity(cap),
+            buoyancy: Vec::with_capacity(cap),
+            steer_sign: Vec::with_capacity(cap),
             part_counts: Vec::with_capacity(cap),
             pending_reward: Vec::with_capacity(cap),
             memory_transmission_rate: Vec::with_capacity(cap),
@@ -387,6 +448,9 @@ impl Individuals {
             self.turn_curvature.push(0.0);
             self.angular_velocity.push(0.0);
             self.axis_offset.push(0.0);
+            self.thrust_offset.push(0.0);
+            self.buoyancy.push(1.0);
+            self.steer_sign.push(1.0);
             self.part_counts.push([0; crate::pixels::PART_KIND_COUNT as usize]);
             self.pending_reward.push(0.0);
             self.memory_transmission_rate.push(0.0);
@@ -1512,6 +1576,25 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
             merge_leaf_into_parent(individuals, pixels, child, victim as u32);
         }
     }
+    // Inherit the parent's sense of which way it swims.
+    //
+    // An offspring's body is its parent's plus a mutation, so the parent's
+    // measurement is a good prior and starting from zero throws it away. That
+    // matters more than it sounds: the estimate takes on the order of a hundred
+    // ticks to converge, so a newborn beginning blind spends a real fraction of
+    // its life steering the wrong way -- and at these lifespans a large part of
+    // the population is always newborn. This is ordinary inherited motor prior,
+    // not inherited skill: the estimate still updates from the animal's own
+    // propulsion, and a body plan that mutated enough will correct away from it.
+    individuals.thrust_offset[child] = individuals.thrust_offset[parent];
+    individuals.steer_sign[child] = individuals.steer_sign[parent];
+    // Buoyancy is heritable with drift, so lineages can specialise by depth:
+    // neutral for open water, heavy for the bottom, light for the surface.
+    individuals.buoyancy[child] = clip(
+        individuals.buoyancy[parent] + normal(rng, 0.0, crate::BUOYANCY_MUTATION_STD),
+        crate::BUOYANCY_MIN,
+        crate::BUOYANCY_MAX,
+    );
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to
     individuals.ticks_since_fed[child] = 0;
