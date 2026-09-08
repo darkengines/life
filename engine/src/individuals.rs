@@ -1657,7 +1657,31 @@ pub fn reproduce_with(individuals: &mut Individuals, pixels: &mut PixelArena, rn
             remove_leaf(individuals, pixels, child, victim as u32);
         }
     } else {
-        let burst = if rng.random::<f32>() < crate::ANOMALY_BURST_CHANCE {
+        // Growing is a decision the PARENT'S CONDITION makes, not something
+        // every birth does automatically.
+        //
+        // Every child used to be born with at least one part more than its
+        // parent, whatever state that parent was in -- expected growth of about
+        // one part per generation, forever, in every lineage at once. Body size
+        // therefore did not evolve, it ratcheted: it went up because the code
+        // said so, not because being bigger worked. That is a large part of why
+        // breaking heredity changed nothing, since one of the most conspicuous
+        // things about these animals was not under selection at all.
+        //
+        // Offspring size tracking maternal condition is about as well
+        // established as anything in life history: a well-fed parent produces
+        // larger young, a struggling one produces smaller. It makes size a
+        // consequence of how the lineage is actually doing, which is what puts
+        // it under selection rather than under a constant.
+        let cap = (individuals.storage_capacity_base[parent]
+            * individuals.size_scale[parent])
+            .max(1e-3);
+        let condition = (individuals.energy[parent] / cap).clamp(0.0, 1.0);
+        let grow_chance = crate::GROWTH_CONDITION_FLOOR
+            + condition * (1.0 - crate::GROWTH_CONDITION_FLOOR);
+        let burst = if rng.random::<f32>() >= grow_chance {
+            0
+        } else if rng.random::<f32>() < crate::ANOMALY_BURST_CHANCE {
             rng.random_range(2..=crate::ANOMALY_BURST_MAX)
         } else {
             1

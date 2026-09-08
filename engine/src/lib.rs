@@ -85,6 +85,10 @@ pub const MATE_CHOICE_ENERGY_RATIO: f32 = 0.8;
 /// organ had to be assembled from many small ones; fusion is how anything ends
 /// up with a single large belly, a wide jaw or a claw rather than a cluster of
 /// average pieces.
+/// Chance a starving parent still produces a larger child. Above zero so a
+/// lineage in a bad patch is not permanently barred from ever growing again,
+/// but low enough that growth genuinely has to be earned.
+pub const GROWTH_CONDITION_FLOOR: f32 = 0.12;
 pub const ANOMALY_MERGE_CHANCE: f32 = 0.16;
 /// How much of the absorbed component's substance survives the joining. Below
 /// one, so fusing is a way to CONCENTRATE size, not to manufacture it.
