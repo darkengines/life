@@ -203,6 +203,29 @@ pub fn pixel_velocities(world: &World, slot: usize, t: f32, eps: f32) -> Vec<[f3
     plus.iter().zip(minus.iter()).map(|(p, m)| [(p[0] - m[0]) / (2.0 * eps), (p[1] - m[1]) / (2.0 * eps)]).collect()
 }
 
+/// Component velocities from positions ALREADY computed at `t`, using a
+/// forward difference.
+///
+/// The central-difference version evaluates forward kinematics twice more, on
+/// top of the evaluation the caller already did for the positions themselves
+/// -- three full FK passes per animal per tick where one and a bit will do.
+/// Central differencing is the more accurate estimator, but these velocities
+/// feed a drag term that is itself a first-order approximation of a fluid, and
+/// the step is small; the extra accuracy was not being used by anything.
+pub fn pixel_velocities_from(
+    world: &World,
+    slot: usize,
+    now: &[[f32; 2]],
+    t: f32,
+    eps: f32,
+) -> Vec<[f32; 2]> {
+    let plus = world_positions(world, slot, t + eps);
+    plus.iter()
+        .zip(now.iter())
+        .map(|(p, c)| [(p[0] - c[0]) / eps, (p[1] - c[1]) / eps])
+        .collect()
+}
+
 /// Where a body's mass actually sits, and how hard it is to spin about that
 /// point. Parts are weighted by their evolved size, so a heavy armoured flank
 /// pulls the balance point toward itself exactly as it should.
@@ -1060,21 +1083,9 @@ pub(crate) fn organ_beat_area(world: &World, slot: usize, kind: u8) -> f32 {
 /// weighted by the area of the part providing it, so storage is a thing an
 /// animal grows rather than a free universal buffer.
 pub(crate) fn storage_capacity(world: &World, slot: usize) -> f32 {
-    let offset = world.individuals.pixel_offset[slot] as usize;
-    let count = world.individuals.pixel_count[slot] as usize;
-    let mut cap = crate::ENERGY_CAP_BASE;
-    for k in 0..count {
-        let g = crate::pixels::girth(&world.pixels, offset + k);
-        let area = g * g / crate::PART_AREA_REF;
-        // What the tissue is, plus how much of a store this particular part
-        // has evolved to be. The tissue term is what makes a belly a belly;
-        // the evolved term keeps it something selection can still shape.
-        let kind = world.pixels.part_type[offset + k] as usize;
-        let per = crate::pixels::PART_STORAGE[kind]
-            + world.pixels.storage[offset + k] * crate::ENERGY_CAP_PER_STORAGE_TRAIT;
-        cap += per * area * crate::ENERGY_CAP_SCALE;
-    }
-    cap * world.individuals.size_scale[slot]
+    // Reads the cached per-plan figure (see recompute_part_counts) and only
+    // applies the live size scaling here.
+    world.individuals.storage_capacity_base[slot] * world.individuals.size_scale[slot]
 }
 
 fn kill(world: &mut World, slot: usize) {
@@ -1221,7 +1232,8 @@ pub fn tick(world: &mut World) {
         .par_iter()
         .map(|&slot| {
             let pos = world_positions(world, slot, world.sim_time);
-            let vel = pixel_velocities(world, slot, world.sim_time, 0.02);
+            // Reuses `pos` rather than evaluating the body a third time.
+            let vel = pixel_velocities_from(world, slot, &pos, world.sim_time, 0.02);
             (slot, pos, vel)
         })
         .collect();
@@ -1581,6 +1593,9 @@ pub fn tick(world: &mut World) {
     let mut t_collision = 0.0f64;
     let mut align_sum = 0.0f32;
     let mut align_n = 0.0f32;
+    // Hoisted out of the per-individual loop: these are scratch buffers, and
+    // reallocating them for every animal on every tick was pure overhead.
+    let mut graze_cells: Vec<usize> = Vec::with_capacity(64);
     let mut pressure_sum = 0.0f32;
     let mut pressure_n = 0.0f32;
     let mut pressure_max = 0.0f32;
@@ -1934,7 +1949,8 @@ pub fn tick(world: &mut World) {
             // the movement energy to do it.
             // Weighted by beat: a mesh that is pumping strains water even
             // when the animal itself is going nowhere.
-            let filter_area = organ_beat_area(world, slot, crate::pixels::PART_FILTER);
+            let filter_beat = organ_beat_area(world, slot, crate::pixels::PART_FILTER);
+            let filter_area = filter_beat;
             let vel = world.individuals.velocity[slot];
             let speed_frac =
                 ((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() / crate::FILTER_FLOW_SPEED).clamp(0.0, 1.0);
@@ -1963,11 +1979,8 @@ pub fn tick(world: &mut World) {
             // which is what gives real animals a finite best size instead of
             // an unbounded reason to grow.
             let mut eaten = 0.0f32;
-            let surface = crate::individuals::exposed_surface(
-                &world.pixels,
-                world.individuals.pixel_offset[slot],
-                world.individuals.pixel_count[slot],
-            ) * world.individuals.size_scale[slot];
+            let surface =
+                world.individuals.exposed_surface[slot] * world.individuals.size_scale[slot];
             // A mouth or a filter mesh is a feeding surface; plain flank is
             // not. Structural tissue can still absorb a little -- small
             // animals really do -- but an animal that wants to live on
@@ -1976,8 +1989,10 @@ pub fn tick(world: &mut World) {
             // is a real alternative to swimming for getting water through a
             // filter -- which is the whole living of every sessile suspension
             // feeder in the sea.
-            let feeding_organs = organ_beat_area(world, slot, crate::pixels::PART_FILTER)
-                + organ_beat_area(world, slot, crate::pixels::PART_MOUTH) * 0.4;
+            // Reuses the filter figure computed just above rather than walking
+            // the whole body a second time for the same number.
+            let feeding_organs =
+                filter_beat + organ_beat_area(world, slot, crate::pixels::PART_MOUTH) * 0.4;
             // Sublinear in surface, which is the part that was still wrong.
             //
             // Charging intake on exposed surface was supposed to stop bigger
@@ -2050,18 +2065,18 @@ pub fn tick(world: &mut World) {
             let intake_capacity = raw.max(0.0).powf(crate::GRAZE_SURFACE_EXPONENT);
             let n_cells = world.individuals.pixel_count[slot].max(1) as f32;
             let per_part = intake_capacity / n_cells;
-            let mut cells: Vec<usize> = graze_pos
-                .iter()
-                .map(|p| {
-                    let (gx, gy) = grid_xy(world, *p);
-                    (gx * world.size + gy) as usize
-                })
-                .collect();
+            // Reuses one buffer for the whole population instead of
+            // allocating a fresh Vec per animal per tick.
+            graze_cells.clear();
+            graze_cells.extend(graze_pos.iter().map(|p| {
+                let (gx, gy) = grid_xy(world, *p);
+                (gx * world.size + gy) as usize
+            }));
             // A body doubled back on itself would otherwise harvest the same
             // water twice over.
-            cells.sort_unstable();
-            cells.dedup();
-            for c in cells {
+            graze_cells.sort_unstable();
+            graze_cells.dedup();
+            for &c in graze_cells.iter() {
                 let here = world.fields.food[c];
                 if here <= 0.0 { continue; }
                 // Saturating intake (a Holling type II functional response on
@@ -2690,7 +2705,7 @@ pub fn tick(world: &mut World) {
         world.production_rows,
         phase,
     );
-    world.fields.step_diffusion(world.size);
+    world.fields.step_diffusion(world.size, world.tick_count);
     timings.push(("fields", t0.elapsed().as_secs_f64() * 1000.0));
 
     world.timings = timings;

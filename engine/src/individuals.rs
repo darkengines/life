@@ -14,6 +14,10 @@ pub const MEM_DIM: usize = 4;
 /// purpose: the capacity of this network comes from having MANY units spread
 /// through the body, not from any one of them being wide.
 pub const NEURITE_DIM: usize = 4;
+/// Bodies up to this many components run the per-part network entirely on the
+/// stack. Sized past what anything in this world actually grows to, so the
+/// heap path is a safety net rather than a code path.
+pub const NEURITE_STACK: usize = 96;
 
 /// A random little transform for a newly grown component.
 ///
@@ -251,6 +255,13 @@ pub struct Individuals {
     /// not very effective" looks like from outside. Cheney, Bongard,
     /// SunSpiral & Lipson's answer is to protect recent morphological
     /// innovation briefly so control has time to readapt to the new body.
+    /// Cached storage capacity before size scaling. Like exposed surface, it
+    /// is a function of the body PLAN -- girth, tissue type and the evolved
+    /// storage trait -- so walking the whole component list for it three times
+    /// per animal per tick was recomputing a constant.
+    pub storage_capacity_base: Vec<f32>,
+    /// Cached exposed surface, recomputed only when the body changes.
+    pub exposed_surface: Vec<f32>,
     pub innovation_protect: Vec<u32>,
     pub ticks_since_fed: Vec<u32>,  // ticks since food/predation/scavenging last succeeded -- reproduction requires this be recent
     pub ticks_since_reproduced: Vec<u32>, // females only: a real recovery period between births, like gestation/nursing
@@ -287,6 +298,8 @@ fn inherit_scalar(rng: &mut Pcg64, parent_val: f32, std: f32, lo: f32, hi: f32) 
 impl Individuals {
     pub fn with_capacity(cap: usize) -> Self {
         Individuals {
+            storage_capacity_base: Vec::with_capacity(cap),
+            exposed_surface: Vec::with_capacity(cap),
             innovation_protect: Vec::with_capacity(cap),
             alive: Vec::with_capacity(cap),
             id: Vec::with_capacity(cap),
@@ -384,6 +397,8 @@ impl Individuals {
             self.size_scale.push(1.0);
             self.kin_signature.push([0.0; crate::KIN_DIM]);
             self.parent_id.push(-1);
+            self.storage_capacity_base.push(0.0);
+            self.exposed_surface.push(0.0);
             self.innovation_protect.push(0);
             self.ticks_since_fed.push(0);
             self.ticks_since_reproduced.push(u32::MAX); // never reproduced yet -- cooldown trivially satisfied
@@ -629,7 +644,17 @@ impl Individuals {
         if count == 0 {
             return [0.0; NEURITE_DIM];
         }
-        let mut sig = vec![[0.0f32; NEURITE_DIM]; count];
+        // Same stack-first buffer as apply_part_drive, and for the same reason:
+        // this runs once per animal per tick, so an allocation here is one for
+        // every animal alive on every tick.
+        let mut stack = [[0.0f32; NEURITE_DIM]; NEURITE_STACK];
+        let mut heap: Vec<[f32; NEURITE_DIM]>;
+        let sig: &mut [[f32; NEURITE_DIM]] = if count <= NEURITE_STACK {
+            &mut stack[..count]
+        } else {
+            heap = vec![[0.0f32; NEURITE_DIM]; count];
+            &mut heap[..]
+        };
         // The root is fed from the individual's own hidden layer: this is
         // where perception enters the body.
         for d in 0..NEURITE_DIM {
@@ -755,14 +780,18 @@ pub const REST_DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 pub fn exposed_surface(pixels: &PixelArena, offset: u32, count: u32) -> f32 {
     if count == 0 { return 0.0; }
     let grid = rest_grid_positions(pixels, offset, count);
-    let occupied: std::collections::HashSet<(i32, i32)> = grid.iter().copied().collect();
+    // Sorted slice and binary search rather than a hash set: bodies are tens
+    // of parts, where the hashing and the allocation both cost more than the
+    // search they replace.
+    let mut occupied: Vec<(i32, i32)> = grid.clone();
+    occupied.sort_unstable();
     let mut total = 0.0;
     for (k, &(x, y)) in grid.iter().enumerate() {
         // Dead tissue strains nothing: it is carried, not used.
         if pixels.dead[offset as usize + k] { continue; }
         let open = REST_DIRECTIONS
             .iter()
-            .filter(|(dx, dy)| !occupied.contains(&(x + dx, y + dy)))
+            .filter(|(dx, dy)| occupied.binary_search(&(x + dx, y + dy)).is_err())
             .count() as f32;
         // Weighted by how big the component is: a broad frond presents more
         // surface to the water than a small one.
@@ -990,6 +1019,23 @@ pub fn recompute_part_counts(individuals: &mut Individuals, pixels: &PixelArena,
         }
     }
     individuals.part_counts[slot] = tally;
+    // Exposed surface is a property of the body PLAN, which only changes when
+    // the body does -- and this is the one place every such change already
+    // routes through. It was being recomputed from scratch every tick for
+    // every animal, building a hash set of lattice coordinates each time, for
+    // a number that had not moved since the animal was born.
+    individuals.exposed_surface[slot] =
+        exposed_surface(pixels, individuals.pixel_offset[slot], individuals.pixel_count[slot]);
+    let mut cap_base = crate::ENERGY_CAP_BASE;
+    for k in 0..count {
+        let g = crate::pixels::girth(pixels, offset + k);
+        let area = g * g / crate::PART_AREA_REF;
+        let kind = pixels.part_type[offset + k] as usize;
+        let per = crate::pixels::PART_STORAGE[kind]
+            + pixels.storage[offset + k] * crate::ENERGY_CAP_PER_STORAGE_TRAIT;
+        cap_base += per * area * crate::ENERGY_CAP_SCALE;
+    }
+    individuals.storage_capacity_base[slot] = cap_base;
 }
 
 pub fn grow_one_pixel(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, slot: usize) -> bool {
@@ -1002,15 +1048,23 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
     let offset = individuals.pixel_offset[slot];
     let count = individuals.pixel_count[slot];
     let grid_pos = rest_grid_positions(pixels, offset, count);
-    let occupied: std::collections::HashSet<(i32, i32)> = grid_pos.iter().cloned().collect();
+    // Sorted slice + binary search instead of a hash set. Growth is the single
+    // most expensive thing in the tick -- reproduction measured 2.829 ms of a
+    // 7.876 ms tick, 36% of the whole simulation -- and a body is tens of
+    // parts, a size at which hashing and allocating a set cost more than the
+    // searches they are meant to accelerate.
+    let mut occupied: Vec<(i32, i32)> = grid_pos.clone();
+    occupied.sort_unstable();
     let mut has_child = vec![false; count as usize];
     for k in 0..count as usize {
         let p = pixels.parent_idx[offset as usize + k];
         if p >= 0 { has_child[p as usize] = true; }
     }
 
-    let mut candidates: Vec<(usize, (i32, i32))> = Vec::new();
-    let mut weights: Vec<f32> = Vec::new();
+    // One buffer of (site, weight) rather than two parallel Vecs, both
+    // starting empty and reallocating as they grow.
+    let mut candidates: Vec<(usize, (i32, i32))> = Vec::with_capacity(count as usize * 2);
+    let mut weights: Vec<f32> = Vec::with_capacity(count as usize * 2);
     for k in 0..count as usize {
         let is_tip = !has_child[k];
         let own_dir = if pixels.parent_idx[offset as usize + k] >= 0 {
@@ -1021,7 +1075,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
         let pos = grid_pos[k];
         for &d in REST_DIRECTIONS.iter() {
             let np = (pos.0 + d.0, pos.1 + d.1);
-            if occupied.contains(&np) { continue; }
+            if occupied.binary_search(&np).is_ok() { continue; }
             let extends_tip = is_tip && own_dir.map_or(false, |od| {
                 let od_dir = angle_to_dir(od);
                 od_dir == d
@@ -1097,7 +1151,7 @@ pub fn grow_one_pixel_weighted(individuals: &mut Individuals, pixels: &mut Pixel
     };
     let make_pair = pixels.symmetric[offset as usize + parent_local]
         && dir.1 != 0
-        && !occupied.contains(&mirror_pos);
+        && occupied.binary_search(&mirror_pos).is_err();
     let added: u32 = if make_pair { 2 } else { 1 };
 
     // Reallocate for the new part(s), copy, append, free the old block.

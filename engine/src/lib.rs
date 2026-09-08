@@ -515,6 +515,10 @@ pub const METABOLIC_EXPONENT: f32 = 0.75;
 /// Area of a typical plain body part, so charging upkeep on area rather than
 /// on a part count did not silently rescale the entire energy economy.
 pub const PART_AREA_REF: f32 = 0.49;
+/// How many ticks a signal field waits between diffusion steps. Each field is
+/// updated once per stride at a correspondingly larger rate, which is very
+/// nearly the same smoothing operator applied a third as often.
+pub const FIELD_DIFFUSION_STRIDE: usize = 3;
 // Measured: setting the blind range to 4 against a full range of 18 emptied
 // the world. The founding population has almost no eyes, so a hard gate
 // starves everything long before eyes can evolve -- a bootstrapping cliff, not
