@@ -599,7 +599,13 @@ pub(crate) fn vision(world: &World, slot: usize, grid: &SpatialGrid) -> [f32; 9]
         }
         let other_mature = world.individuals.age[other] as f32 >= crate::MATURITY_AGE * world.maturity_multiplier;
         let other_recovered = !world.individuals.female[other] || world.individuals.ticks_since_reproduced[other] >= gestation_ticks(world, other);
-        if world.individuals.female[other] != my_female && other_mature && other_recovered {
+        // A hermaphrodite can pair with anyone; two separate-sex animals still
+        // need opposite sexes. Either party being hermaphroditic is enough,
+        // since only one of them has to supply the missing role.
+        let compatible = world.individuals.female[other] != my_female
+            || world.individuals.hermaphrodite[slot] > crate::HERMAPHRODITE_THRESHOLD
+            || world.individuals.hermaphrodite[other] > crate::HERMAPHRODITE_THRESHOLD;
+        if compatible && other_mature && other_recovered {
             if best_mate.map_or(true, |(bd, _)| d < bd) { best_mate = Some((d, delta)); }
         }
     }
@@ -1248,7 +1254,12 @@ fn mate_and_crowding(world: &World, slot: usize, grid: &SpatialGrid) -> (bool, u
             crowd += 1;
         }
         if found_mate { continue; }
-        if world.individuals.female[other] == my_female { continue; }
+        if world.individuals.female[other] == my_female
+            && world.individuals.hermaphrodite[slot] <= crate::HERMAPHRODITE_THRESHOLD
+            && world.individuals.hermaphrodite[other] <= crate::HERMAPHRODITE_THRESHOLD
+        {
+            continue;
+        }
         // Female choice. A female only accepts a partner carrying real
         // reserves, so energy becomes a display of condition rather than a
         // private buffer: males that merely survive do not breed, males that
@@ -2308,7 +2319,12 @@ pub fn tick(world: &mut World) {
                 // around. Without this the trait would simply ratchet to
                 // its cap in every lineage and the whole mechanism below
                 // would quietly stop mattering.
-                + crate::DISEASE_RESISTANCE_METABOLIC_COST * world.individuals.disease_resistance[slot];
+                + crate::DISEASE_RESISTANCE_METABOLIC_COST * world.individuals.disease_resistance[slot]
+                // Carrying both sets of reproductive machinery costs upkeep.
+                // Without this hermaphroditism would be strictly better and
+                // would simply take over, when what is wanted is a genuine
+                // trade-off that density decides.
+                + crate::HERMAPHRODITE_METABOLIC_COST * world.individuals.hermaphrodite[slot];
             // A body plan that has just changed is shielded briefly. Its
             // controller was inherited for the OLD body and has not had a
             // chance to adapt, so judging it at full pressure punishes
@@ -2593,7 +2609,7 @@ pub fn tick(world: &mut World) {
                 world.spend_reproduction += repro_cost as f64;
                 world.individuals.pending_reward[slot] += crate::REWARD_REPRODUCE;
                 world.individuals.ticks_since_reproduced[slot] = 0;
-                let child = crate::individuals::reproduce(&mut world.individuals, &mut world.pixels, &mut world.rng, slot, world.growth_tip_weight);
+                let child = crate::individuals::reproduce_with(&mut world.individuals, &mut world.pixels, &mut world.rng, slot, world.growth_tip_weight, world.scramble_inheritance);
                 // Parental investment: most of what the parent spent goes INTO
                 // the offspring rather than evaporating. A newborn used to
                 // start on a flat 10 units whatever it cost to make, so there
@@ -2693,6 +2709,18 @@ pub fn tick(world: &mut World) {
         }
     }
 
+    // Refresh the sex ratio the allocation bias reads from.
+    {
+        let mut n = 0u32;
+        let mut f = 0u32;
+        for s in 0..world.individuals.alive.len() {
+            if world.individuals.alive[s] {
+                n += 1;
+                if world.individuals.female[s] { f += 1; }
+            }
+        }
+        world.individuals.female_share = if n > 0 { f as f32 / n as f32 } else { 0.5 };
+    }
     world.mean_food = if world.fields.food.is_empty() {
         0.0
     } else {

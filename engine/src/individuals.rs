@@ -294,7 +294,27 @@ pub struct Individuals {
     // reference here simply stops resolving to anyone, exactly like
     // parent_id already had to be id-based for the same reason.
     pub attached_to: Vec<i64>,
-    pub female: Vec<bool>, // randomly assigned each birth (not inherited/evolved -- a coin flip, like real sex determination)
+    pub female: Vec<bool>, // assigned each birth, biased toward the rarer sex -- see `reproduce`
+    /// Fraction of the living population that is female, refreshed each tick.
+    /// Feeds the sex-ratio correction above.
+    pub female_share: f32,
+    /// How hermaphroditic this animal is, heritable, 0 to 1.
+    ///
+    /// Deliberately a trait rather than a global switch. Whether separate sexes
+    /// or hermaphroditism is the better strategy is not a fact about animals in
+    /// general, it is a fact about the density they live at: when mates are
+    /// plentiful, separate sexes are cheaper, and when finding one is the
+    /// binding constraint, being able to breed with whoever you meet is worth
+    /// far more than specialising. That is Baker's law, and it is why sessile
+    /// and low-density marine invertebrates are so overwhelmingly
+    /// hermaphroditic while dense schooling animals are not.
+    ///
+    /// Making it evolvable means this world resolves the question for itself,
+    /// under its own densities, instead of being told the answer -- and if
+    /// density changes, the answer is free to change with it. It is not free:
+    /// carrying both sets of machinery costs upkeep, which is exactly why
+    /// separate sexes persist wherever mates are easy to find.
+    pub hermaphrodite: Vec<f32>,
     pub birth_size: Vec<u32>,       // pixel_count at birth -- fixed for life; body PLAN doesn't change post-birth
     pub size_scale: Vec<f32>,       // uniform inflation of that fixed plan -- juvenile->adult growth is getting
                                      // BIGGER (every joint length scales up), never sprouting new parts
@@ -395,6 +415,8 @@ impl Individuals {
             weight_transmission_rate: Vec::with_capacity(cap),
             attached_to: Vec::with_capacity(cap),
             female: Vec::with_capacity(cap),
+            female_share: 0.5,
+            hermaphrodite: Vec::with_capacity(cap),
             birth_size: Vec::with_capacity(cap),
             size_scale: Vec::with_capacity(cap),
             kin_signature: Vec::with_capacity(cap),
@@ -457,6 +479,7 @@ impl Individuals {
             self.weight_transmission_rate.push(0.0);
             self.attached_to.push(-1);
             self.female.push(false);
+            self.hermaphrodite.push(0.0);
             self.birth_size.push(1);
             self.size_scale.push(1.0);
             self.kin_signature.push([0.0; crate::KIN_DIM]);
@@ -1072,6 +1095,21 @@ pub fn recompute_axis_offset(individuals: &mut Individuals, pixels: &PixelArena,
     };
 }
 
+/// Give an individual entirely fresh heritable traits, owing nothing to any
+/// parent. Used only by the heredity control.
+pub fn randomize_brain_and_traits(individuals: &mut Individuals, rng: &mut Pcg64, slot: usize) {
+    individuals.randomize_brain(slot, rng);
+    individuals.bend_amplitude[slot] = rng.random_range(0.1..1.2);
+    individuals.bend_frequency[slot] = rng.random_range(0.05..0.5);
+    individuals.bend_phase[slot] = rng.random_range(0.0..std::f32::consts::TAU);
+    individuals.bite_force[slot] = rng.random_range(0.0..2.0);
+    individuals.stickiness[slot] = rng.random_range(0.0..1.0);
+    individuals.buoyancy[slot] = rng.random_range(crate::BUOYANCY_MIN..crate::BUOYANCY_MAX);
+    individuals.hermaphrodite[slot] = rng.random::<f32>();
+    individuals.thrust_offset[slot] = rng.random_range(-std::f32::consts::PI..std::f32::consts::PI);
+    individuals.steer_sign[slot] = if rng.random::<bool>() { 1.0 } else { -1.0 };
+}
+
 pub fn recompute_part_counts(individuals: &mut Individuals, pixels: &PixelArena, slot: usize) {
     let offset = individuals.pixel_offset[slot] as usize;
     let count = individuals.pixel_count[slot] as usize;
@@ -1385,6 +1423,9 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
     individuals.weight_transmission_rate[slot] = rng.random_range(0.2..0.8);
     individuals.attached_to[slot] = -1;
     individuals.female[slot] = rng.random::<bool>();
+    // Founders vary, so both strategies are present for selection to work on
+    // rather than one having to be invented from nothing.
+    individuals.hermaphrodite[slot] = rng.random::<f32>() * 0.6;
     // Explicit resets: slots are RECYCLED (a dead individual's old field
     // values persist until overwritten), not just freshly zero-initialized,
     // so anything not set here would silently leak the previous occupant's
@@ -1411,6 +1452,13 @@ pub fn spawn_founder(individuals: &mut Individuals, pixels: &mut PixelArena, rng
 /// transmission), grow one new pixel, mutate all traits -- matches
 /// pixel_world.py's `mutated_child_at`.
 pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, parent: usize, tip_weight: f32) -> usize {
+    reproduce_with(individuals, pixels, rng, parent, tip_weight, false)
+}
+
+/// As `reproduce`, but `scramble` replaces the child's heritable traits with
+/// random ones instead of the parent's -- the control that isolates whether
+/// heredity is doing any work. See World::scramble_inheritance.
+pub fn reproduce_with(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &mut Pcg64, parent: usize, tip_weight: f32, scramble: bool) -> usize {
     let child = individuals.alloc_slot();
     let parent_offset = individuals.pixel_offset[parent];
     let parent_count = individuals.pixel_count[parent];
@@ -1491,7 +1539,28 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
     individuals.memory_transmission_rate[child] = mem_rate;
     individuals.weight_transmission_rate[child] = clip(individuals.weight_transmission_rate[parent] + normal(rng, 0.0, 0.05), 0.0, 1.0);
     individuals.attached_to[child] = -1;
-    individuals.female[child] = rng.random::<bool>();
+    // Sex allocation is biased toward whichever sex is RARE.
+    //
+    // A fair coin per birth is fine in a large population and lethal in a small
+    // one: with a handful of animals left the ratio drifts, and a world of four
+    // came out all male -- no mates, no births, certain extinction from a run of
+    // coin flips rather than from anything about the animals. Sampling noise
+    // should not be the thing that ends a lineage.
+    //
+    // Biasing toward the rarer sex is not a patch, it is Fisher's principle
+    // made mechanical: the rarer sex has higher expected reproductive value, so
+    // over-producing it is exactly what selection favours, and plenty of real
+    // species implement it directly through environmental or social sex
+    // determination. The bias is proportional to the skew, so at parity this is
+    // still a fair coin and only a genuinely lopsided population feels it.
+    let female_share = individuals.female_share.clamp(0.05, 0.95);
+    let p_female = (0.5 + (0.5 - female_share) * crate::SEX_RATIO_CORRECTION).clamp(0.05, 0.95);
+    individuals.female[child] = rng.random::<f32>() < p_female;
+    individuals.hermaphrodite[child] = clip(
+        individuals.hermaphrodite[parent] + normal(rng, 0.0, crate::HERMAPHRODITE_MUTATION_STD),
+        0.0,
+        1.0,
+    );
     for d in 0..crate::KIN_DIM {
         individuals.kin_signature[child][d] = clip(individuals.kin_signature[parent][d] + normal(rng, 0.0, crate::KIN_MUTATION_STD), -2.0, 2.0);
     }
@@ -1595,6 +1664,12 @@ pub fn reproduce(individuals: &mut Individuals, pixels: &mut PixelArena, rng: &m
         crate::BUOYANCY_MIN,
         crate::BUOYANCY_MAX,
     );
+    if scramble {
+        // Break heredity, and ONLY heredity: the child is a viable animal with
+        // a viable body, its traits simply owe nothing to its parent. Anything
+        // else changed here would confound the comparison.
+        randomize_brain_and_traits(individuals, rng, child);
+    }
     individuals.birth_size[child] = individuals.pixel_count[child];
     individuals.size_scale[child] = 1.0; // starts at the same baseline size as its birth plan, regardless of how big the parent had inflated to
     individuals.ticks_since_fed[child] = 0;

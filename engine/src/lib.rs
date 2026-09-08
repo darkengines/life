@@ -1000,6 +1000,16 @@ pub const THRUST_OFFSET_MIN_FORCE: f32 = 0.05;
 /// not become bricks or balloons.
 /// How fast an animal learns whether its steering is inverted. Slow, because
 /// a single tick's rotation is dominated by whatever it collided with.
+/// How strongly sex allocation is pulled toward the rarer sex. At 1.0 a
+/// population that is 90% male produces females 90% of the time; at 0 it is a
+/// fair coin and small populations can drift to a single sex and die of it.
+pub const SEX_RATIO_CORRECTION: f32 = 0.8;
+/// Hermaphroditism: heritable, above the threshold an animal can pair with
+/// anyone, and it costs upkeep so separate sexes stay viable where mates are
+/// easy to find. See Individuals::hermaphrodite.
+pub const HERMAPHRODITE_MUTATION_STD: f32 = 0.05;
+pub const HERMAPHRODITE_THRESHOLD: f32 = 0.5;
+pub const HERMAPHRODITE_METABOLIC_COST: f32 = 0.010;
 pub const STEER_SIGN_LEARN_RATE: f32 = 0.01;
 pub const BUOYANCY_MUTATION_STD: f32 = 0.02;
 pub const BUOYANCY_MIN: f32 = 0.88;
@@ -1206,6 +1216,13 @@ pub struct World {
     /// choice rather than a rewrite.
     /// Test-only: when set, replaces every brain's movement intent, isolating
     /// the steering loop from the brain driving it.
+    /// Test-only: when set, offspring get RANDOM heritable traits instead of
+    /// their parents'. This is the control that answers whether selection is
+    /// doing anything at all: if a population whose children inherit nothing
+    /// performs as well as one whose children inherit everything, then what
+    /// looks like evolution is drift, and no amount of tuning selection
+    /// pressure is going to help.
+    pub scramble_inheritance: bool,
     pub forced_intent: Option<[f32; 2]>,
     pub backend: locomotion::Backend,
     #[cfg(feature = "rapier")]
@@ -1380,6 +1397,7 @@ impl World {
             max_pressure: 0.0,
             food_regrow_rate,
             food_cap,
+            scramble_inheritance: false,
             forced_intent: None,
             backend: locomotion::Backend::Analytic,
             #[cfg(feature = "rapier")]
@@ -2162,6 +2180,14 @@ impl World {
             locomotion::Backend::Analytic => "analytic".to_string(),
             locomotion::Backend::Rigid => "rigid".to_string(),
         }
+    }
+
+    /// Test-only: break heredity. Offspring get random traits rather than
+    /// their parents', which removes the mechanism selection acts through
+    /// while leaving everything else -- the same world, the same deaths, the
+    /// same reproduction -- exactly as it was.
+    fn debug_scramble_inheritance(&mut self, on: bool) {
+        self.scramble_inheritance = on;
     }
 
     /// Test-only: override every animal's movement intent with one fixed
