@@ -1087,7 +1087,17 @@ pub const TURN_POSTURE_BIAS_SCALE: f32 = 0.35;
 // whirling around their own heads instead of swimming, which is worse: an
 // animal that cannot turn at least holds a course. 0.15 turns briskly without
 // running away with itself.
-pub const ROTATIONAL_INERTIA: f32 = 0.15;
+/// How lopsided a turning stroke becomes. At 1.0 a hard turn beats on one side
+/// only; the stroke still returns, it just pushes far more water one way than
+/// the other over a cycle.
+pub const TURN_STROKE_ASYMMETRY: f32 = 0.45;
+/// How much of a turn is a held lean rather than stroke asymmetry. Gated on
+/// swim effort, so a body that is not beating cannot lean itself into a spin.
+pub const TURN_LEAN_FRACTION: f32 = 0.55;
+// From the sweep: best forward speed (0.063/tick) with the most animals on
+// target, across two decades of this constant. Turn authority barely responded
+// to it, which is itself the finding -- inertia was never the limit.
+pub const ROTATIONAL_INERTIA: f32 = 0.05;
 // Raised with the inertia cut: water resists rotation strongly, and a body
 // that stops being driven should stop turning rather than coasting round.
 pub const ANGULAR_DAMPING: f32 = 4.0;
@@ -1255,6 +1265,16 @@ pub struct World {
     /// which is the control: animals aggregate around food patches whether or
     /// not they attract one another, so clustering measured without this
     /// comparison attributes nothing.
+    /// Runtime-overridable turning parameters. Every one of these has been
+    /// tuned by rebuild-and-look, which is slow and has twice overshot into an
+    /// opposite failure -- nailed in place one way, spinning on the spot the
+    /// other. Sweepable, they can be chosen against a measurement of both
+    /// things that matter at once: how fast an animal turns AND whether it can
+    /// still swim while doing it.
+    pub rot_inertia: f32,
+    pub max_ang_speed: f32,
+    pub turn_asymmetry: f32,
+    pub turn_lean: f32,
     pub affinity_scale: f32,
     pub scramble_inheritance: bool,
     pub forced_intent: Option<[f32; 2]>,
@@ -1431,6 +1451,10 @@ impl World {
             max_pressure: 0.0,
             food_regrow_rate,
             food_cap,
+            rot_inertia: ROTATIONAL_INERTIA,
+            max_ang_speed: MAX_ANGULAR_SPEED,
+            turn_asymmetry: TURN_STROKE_ASYMMETRY,
+            turn_lean: TURN_LEAN_FRACTION,
             affinity_scale: 1.0,
             scramble_inheritance: false,
             forced_intent: None,
@@ -2215,6 +2239,14 @@ impl World {
             locomotion::Backend::Analytic => "analytic".to_string(),
             locomotion::Backend::Rigid => "rigid".to_string(),
         }
+    }
+
+    /// Test-only: set the four turning parameters together.
+    fn debug_set_turn(&mut self, inertia: f32, max_ang: f32, asymmetry: f32, lean: f32) {
+        self.rot_inertia = inertia;
+        self.max_ang_speed = max_ang;
+        self.turn_asymmetry = asymmetry;
+        self.turn_lean = lean;
     }
 
     /// Test-only: scale both social affinity levels. 0.0 turns them off.

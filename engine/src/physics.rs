@@ -179,9 +179,57 @@ pub fn world_positions_at(world: &World, slot: usize, t: f32, root: [f32; 2]) ->
         // bounded separately, so a creature can genuinely throw its body into
         // a turn.
         let oscillation = raw_wave.clamp(world.pixels.min_angle[offset + k], world.pixels.max_angle[offset + k]);
-        let posture = (world.individuals.turn_curvature[slot] * flex)
+        // Turning is an ASYMMETRIC STROKE, not a bend held in the body.
+        //
+        // Steering used to add a constant offset to every joint, so an animal
+        // that wanted to turn simply became a permanently curved shape. A
+        // permanently curved shape in moving water produces permanent torque,
+        // so it circles forever -- and it keeps circling whether or not it is
+        // swimming, because the bend does not depend on the stroke. That is
+        // where the spinning came from, and no tuning of inertia or damping
+        // could have fixed it: the model said "hold this shape", and holding a
+        // curved shape is what spinning IS.
+        //
+        // No animal turns that way. A fish turns by beating harder on one side
+        // than the other, so the asymmetry lives in the STROKE rather than in
+        // the posture: push more water to the left than the right and you
+        // rotate, and the moment you stop beating you stop rotating. This makes
+        // rotation a consequence of fin motion in exactly the sense the rest of
+        // the locomotion model already works -- nothing is applied to the
+        // animal, it does something and the water does the rest.
+        let turn = (world.individuals.turn_curvature[slot] * flex)
             .clamp(-crate::MAX_POSTURE_BEND, crate::MAX_POSTURE_BEND);
-        let wave = oscillation + posture;
+        // One half of the sweep is amplified and the other attenuated, so the
+        // stroke stays a stroke -- it still returns -- while pushing harder to
+        // one side over a full cycle. Kept moderate: pushed too far the stroke
+        // becomes one-sided, which destroys the travelling wave that produces
+        // thrust in the first place, and the animal deadlocks -- commanding a
+        // hard turn kills its propulsion, and with no propulsion there is no
+        // torque to turn with.
+        // Normalised so a turning stroke keeps its total sweep instead of
+        // losing half of it. Amplifying one side and attenuating the other by
+        // the same amount removes power from the beat exactly when the animal
+        // needs it most, which is the deadlock: a hard turn skews the stroke,
+        // the skewed stroke stops driving the body, and turning torque comes
+        // from drag on MOVING segments -- so the harder it tries to turn, the
+        // less able to turn it becomes. Rebalancing keeps the water moved
+        // constant and changes only which side it goes.
+        let skew = turn * world.turn_asymmetry;
+        let norm = 1.0 / (1.0 + skew.abs() * 0.5).max(1e-3);
+        let stroke_bias = if oscillation >= 0.0 {
+            (1.0 + skew) * norm
+        } else {
+            (1.0 - skew) * norm
+        };
+        // A fish does lean into a turn as well as beating asymmetrically, so a
+        // held bend belongs here -- but gated on how hard the animal is
+        // actually swimming. That gate is the whole difference from before: a
+        // bend held by an animal that is not beating produced torque out of
+        // nothing and span it on the spot forever. Now an animal that stops
+        // swimming stops turning, which is what happens in water.
+        let effort = (world.individuals.swim_gain[slot] / crate::SWIM_GAIN_MAX).clamp(0.0, 1.0);
+        let lean = turn * world.turn_lean * effort;
+        let wave = oscillation * stroke_bias.max(0.0) + lean;
         let parent = world.pixels.parent_idx[offset + k];
         // A part's own evolved `size` stretches ITS segment specifically
         // (on top of the individual-wide size_scale inflation) -- a body
@@ -827,9 +875,18 @@ fn joint_targets(world: &World, slot: usize, t: f32) -> Vec<f32> {
                 world.pixels.min_angle[offset + k],
                 world.pixels.max_angle[offset + k],
             );
-            let posture = (world.individuals.turn_curvature[slot] * flex)
+            // Same asymmetric stroke as the analytic model -- both backends
+            // must be given identical intent or comparing them means nothing.
+            let turn = (world.individuals.turn_curvature[slot] * flex)
                 .clamp(-crate::MAX_POSTURE_BEND, crate::MAX_POSTURE_BEND);
-            osc + posture
+            let bias = if osc >= 0.0 {
+                1.0 + turn * world.turn_asymmetry
+            } else {
+                1.0 - turn * world.turn_asymmetry
+            };
+            let effort =
+                (world.individuals.swim_gain[slot] / crate::SWIM_GAIN_MAX).clamp(0.0, 1.0);
+            osc * bias.max(0.0) + turn * world.turn_lean * effort
         })
         .collect()
 }
@@ -1940,12 +1997,12 @@ pub fn tick(world: &mut World) {
             // The real second moment about the balance point, so a long body
             // is genuinely sluggish to turn and a compact one is nimble.
             let inertia = (moment * world.individuals.size_scale[slot]).max(1.0)
-                * crate::ROTATIONAL_INERTIA;
+                * world.rot_inertia;
             let ang_acc = torque / inertia
                 - world.angular_damping * world.individuals.angular_velocity[slot];
             world.individuals.angular_velocity[slot] =
                 (world.individuals.angular_velocity[slot] + ang_acc * world.dt)
-                    .clamp(-crate::MAX_ANGULAR_SPEED, crate::MAX_ANGULAR_SPEED);
+                    .clamp(-world.max_ang_speed, world.max_ang_speed);
             let dtheta = world.individuals.angular_velocity[slot] * world.dt;
             world.individuals.heading[slot] += dtheta;
             // Every part's position is rebuilt each tick by forward kinematics
